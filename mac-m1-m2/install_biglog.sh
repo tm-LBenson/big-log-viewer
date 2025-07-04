@@ -27,5 +27,5 @@ GOOS=darwin GOARCH=$(uname -m | sed 's/x86_64/amd64/;s/arm64/arm64/') \
   go build -o biglog ./cmd/biglog
 
 mv biglog "$DEST"
-echo "✔ Built and placed $DEST"
+echo "Built and placed $DEST"
 
