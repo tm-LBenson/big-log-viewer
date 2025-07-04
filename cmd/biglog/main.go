@@ -1,11 +1,11 @@
 package main
 
 import (
-	"bytes"
+	"embed"
 	"encoding/json"
 	"flag"
 	"fmt"
-	"io"
+	"io/fs"
 	"log"
 	"net/http"
 	"os"
@@ -20,12 +20,21 @@ const defaultRoot = "./logs"
 var rootDir string
 var current *indexer.File
 
+//go:embed dist/*
+var dist embed.FS
+
 func main() {
 	flag.StringVar(&rootDir, "logdir", defaultRoot, "folder containing .html logs")
 	flag.Parse()
 	abs, _ := filepath.Abs(rootDir)
 	rootDir = abs
 	_ = os.MkdirAll(rootDir, 0o755)
+
+	sub, err := fs.Sub(dist, "dist")
+	if err != nil {
+		log.Fatalf("embed: %v", err)
+	}
+	http.Handle("/", http.FileServer(http.FS(sub)))
 
 	http.HandleFunc("/api/list", listDir)
 	http.HandleFunc("/api/open", openFile)
@@ -35,10 +44,7 @@ func main() {
 	http.HandleFunc("/api/root", getRoot)
 	http.HandleFunc("/api/root/set", setRoot)
 
-	fs := http.FileServer(http.Dir("./frontend/dist"))
-	http.Handle("/", fs)
-
-	fmt.Println("serving on http://localhost:8844")
+	fmt.Println("serving http://localhost:8844")
 	log.Fatal(http.ListenAndServe(":8844", nil))
 }
 
@@ -60,7 +66,7 @@ func listDir(w http.ResponseWriter, r *http.Request) {
 func openFile(w http.ResponseWriter, r *http.Request) {
 	path := r.URL.Query().Get("path")
 	if path == "" {
-		http.Error(w, "path query param required", 400)
+		http.Error(w, "path param required", 400)
 		return
 	}
 	if !filepath.IsAbs(path) {
@@ -96,7 +102,7 @@ func chunk(w http.ResponseWriter, r *http.Request) {
 func raw(w http.ResponseWriter, r *http.Request) {
 	path := r.URL.Query().Get("path")
 	if path == "" {
-		http.Error(w, "path query param required", 400)
+		http.Error(w, "path param required", 400)
 		return
 	}
 	if !filepath.IsAbs(path) {
@@ -119,34 +125,18 @@ func searchLines(w http.ResponseWriter, r *http.Request) {
 	if limit <= 0 {
 		limit = 500
 	}
-	matches := make([]int, 0, limit)
-	needle := bytes.ToLower([]byte(q))
-	buf := make([]byte, 4096)
-
-	for i, off := range current.Offsets {
-		if len(matches) >= limit {
+	needle := strings.ToLower(q)
+	m := make([]int, 0, limit)
+	for i := range current.Offsets {
+		if len(m) >= limit {
 			break
 		}
-		next := int64(0)
-		if i+1 < len(current.Offsets) {
-			next = current.Offsets[i+1]
-		} else {
-			var err error
-			next, err = current.File.Seek(0, io.SeekEnd)
-			if err != nil {
-				break
-			}
-		}
-		size := next - off
-		if size > int64(len(buf)) {
-			buf = make([]byte, size)
-		}
-		current.File.ReadAt(buf[:size], off)
-		if bytes.Contains(bytes.ToLower(buf[:size]), needle) {
-			matches = append(matches, i)
+		line, _ := current.Lines(i, 1)
+		if strings.Contains(strings.ToLower(line[0]), needle) {
+			m = append(m, i)
 		}
 	}
-	writeJSON(w, struct{ Matches []int }{matches})
+	writeJSON(w, struct{ Matches []int }{m})
 }
 
 func getRoot(w http.ResponseWriter, r *http.Request) {
@@ -163,8 +153,7 @@ func setRoot(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "bad json", 400)
 		return
 	}
-	info, err := os.Stat(req.Path)
-	if err != nil || !info.IsDir() {
+	if info, err := os.Stat(req.Path); err != nil || !info.IsDir() {
 		http.Error(w, "folder not found", 400)
 		return
 	}
