@@ -1,0 +1,8 @@
+{
+  "name": "big-log-viewer-root",
+  "version": "1.0.0",
+  "scripts": {
+    "build": "rm -rf cmd/biglog/dist && cd frontend && npm run build && mv dist ../cmd/biglog",
+    "start": "go run cmd/biglog/main.go"
+  }
+}
