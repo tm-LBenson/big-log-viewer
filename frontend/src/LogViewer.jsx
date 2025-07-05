@@ -2,28 +2,28 @@ import { Virtuoso } from "react-virtuoso";
 import { useEffect, useRef, useState, useCallback } from "react";
 import "./App.css";
 
-const ROW = 18;
-const PAGE = 800;
-const WINDOW_MAX = 300_000;
-const HALF_WIN = WINDOW_MAX / 2;
-const KEEP = 6;
-const HANDLE_H = 40;
-const HEIGHT = window.innerHeight;
-const TRACK_H = HEIGHT - 100;
-const RANGE = (TRACK_H - HANDLE_H) / 2;
-const SPEED = 1500;
+const ROW = 18,
+  PAGE = 800,
+  WINDOW_MAX = 300_000,
+  HALF_WIN = WINDOW_MAX / 2,
+  KEEP = 6,
+  HANDLE = 40;
+const HEIGHT = window.innerHeight,
+  TRACK_H = HEIGHT - 100,
+  RANGE = (TRACK_H - HANDLE) / 2,
+  SPEED = 1500;
 
 export default function LogViewer({ path }) {
   const [lineCount, setLineCount] = useState(0);
   const [windowCount, setWindowCount] = useState(WINDOW_MAX);
   const [ready, setReady] = useState(false);
+  const [boot, setBoot] = useState(false);
   const [raw, setRaw] = useState(false);
   const [hl, setHl] = useState(true);
   const [query, setQuery] = useState("");
   const [matches, setMatches] = useState([]);
   const [cur, setCur] = useState(0);
   const [searching, setSearching] = useState(false);
-  const [, force] = useState(0);
 
   const base = useRef(0);
   const virt = useRef(null);
@@ -48,7 +48,6 @@ export default function LogViewer({ path }) {
         .then((lines) => {
           cache.current.set(p, lines);
           pending.current.delete(p);
-          force((t) => t + 1);
         });
     },
     [lineCount],
@@ -56,8 +55,8 @@ export default function LogViewer({ path }) {
 
   const ensurePages = useCallback(
     (f, t) => {
-      const a = Math.floor(f / PAGE) - 1;
-      const b = Math.floor(t / PAGE) + 1;
+      const a = Math.floor(f / PAGE) - 1,
+        b = Math.floor(t / PAGE) + 1;
       for (let p = a; p <= b; p++) if (p >= 0) fetchPage(p);
     },
     [fetchPage],
@@ -67,6 +66,7 @@ export default function LogViewer({ path }) {
     cache.current.clear();
     pending.current.clear();
     setReady(false);
+    setBoot(false);
     setMatches([]);
     setCur(0);
     mounted.current = false;
@@ -82,27 +82,28 @@ export default function LogViewer({ path }) {
         setLineCount(d.Lines);
         setWindowCount(Math.min(WINDOW_MAX, d.Lines));
         setReady(true);
+        return fetch(`/api/chunk?start=0&count=${PAGE}`);
+      })
+      .then((r) => r.json())
+      .then((lines) => {
+        cache.current.set(0, lines);
+        setBoot(true);
       });
   }, [path]);
-
-  useEffect(() => {
-    if (ready && virt.current)
-      virt.current.scrollToIndex({ index: 0, align: "start" });
-  }, [ready]);
 
   const abs = (i) => base.current + i;
   const getLine = (i) => {
     const n = abs(i);
     if (n >= lineCount) return "";
-    const p = Math.floor(n / PAGE);
-    const o = n % PAGE;
+    const p = Math.floor(n / PAGE),
+      o = n % PAGE;
     return cache.current.get(p)?.[o] ?? "…";
   };
 
   const Row = (i) => {
-    const txt = getLine(i);
-    const n = abs(i);
-    const hit = hl && matches[cur] === n;
+    const txt = getLine(i),
+      n = abs(i),
+      hit = hl && matches[cur] === n;
     const html = raw
       ? txt.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
       : txt;
@@ -121,7 +122,7 @@ export default function LogViewer({ path }) {
     );
   };
 
-  const resizeWin = () =>
+  const resize = () =>
     setWindowCount(Math.min(WINDOW_MAX, lineCount - base.current));
 
   const goLine = (line) => {
@@ -131,20 +132,17 @@ export default function LogViewer({ path }) {
         0,
         Math.min(lineCount - WINDOW_MAX, tgt - HALF_WIN),
       );
-      resizeWin();
+      resize();
       mounted.current = false;
-      scrolled.current = false;
-      force((t) => t + 1);
-      requestAnimationFrame(() => {
-        if (virt.current)
-          virt.current.scrollToIndex({
-            index: tgt - base.current,
-            align: "start",
-          });
+      virt.current?.scrollToIndex({
+        index: tgt - base.current,
+        align: "start",
       });
-    } else if (virt.current) {
-      virt.current.scrollToIndex({ index: tgt - base.current, align: "start" });
-    }
+    } else
+      virt.current?.scrollToIndex({
+        index: tgt - base.current,
+        align: "start",
+      });
   };
 
   const onRange = ({ startIndex, endIndex }) => {
@@ -156,22 +154,20 @@ export default function LogViewer({ path }) {
     if (!scrolled.current) return;
     if (startIndex > HALF_WIN && base.current + windowCount < lineCount) {
       base.current += HALF_WIN;
-      resizeWin();
+      resize();
       virt.current.scrollToIndex({
         index: startIndex - HALF_WIN,
         align: "start",
       });
     } else if (startIndex < 0 && base.current > 0) {
       base.current = Math.max(0, base.current - HALF_WIN);
-      resizeWin();
+      resize();
       virt.current.scrollToIndex({
         index: startIndex + HALF_WIN,
         align: "start",
       });
     }
   };
-
-  const fit = (l) => goLine(l);
 
   const runSearch = (q) => {
     if (!q) {
@@ -188,7 +184,7 @@ export default function LogViewer({ path }) {
         const hits = d.Matches || [];
         setMatches(hits);
         setCur(0);
-        if (hits.length) fit(hits[0]);
+        if (hits.length) goLine(hits[0]);
       });
   };
 
@@ -196,14 +192,14 @@ export default function LogViewer({ path }) {
     if (!matches.length) return;
     const j = (cur + dir + matches.length) % matches.length;
     setCur(j);
-    fit(matches[j]);
+    goLine(matches[j]);
   };
 
   const animate = (ts) => {
     if (!lastTs.current) lastTs.current = ts;
-    const dt = (ts - lastTs.current) / 1000;
+    const rows =
+      (dragPix.current / RANGE) * SPEED * ((ts - lastTs.current) / 1000);
     lastTs.current = ts;
-    const rows = (dragPix.current / RANGE) * SPEED * dt;
     if (rows) virt.current.scrollBy({ top: rows * ROW });
     rafId.current = requestAnimationFrame(animate);
   };
@@ -217,12 +213,12 @@ export default function LogViewer({ path }) {
       d = Math.max(-RANGE, Math.min(RANGE, d));
       dragPix.current = d;
       track.current.firstChild.style.top = `calc(50% + ${d}px - ${
-        HANDLE_H / 2
+        HANDLE / 2
       }px)`;
     };
     const up = () => {
       dragPix.current = 0;
-      track.current.firstChild.style.top = `calc(50% - ${HANDLE_H / 2}px)`;
+      track.current.firstChild.style.top = `calc(50% - ${HANDLE / 2}px)`;
       cancelAnimationFrame(rafId.current);
       window.removeEventListener("pointermove", move);
       window.removeEventListener("pointerup", up);
@@ -232,20 +228,26 @@ export default function LogViewer({ path }) {
     rafId.current = requestAnimationFrame(animate);
   };
 
+  const boxRef = useRef(null);
+
   useEffect(() => {
-    if (!ready) return;
+    const currentRef = boxRef.current;
+    if (!boot || !currentRef) return;
     const wheel = (e) => {
       e.preventDefault();
       scrolled.current = true;
-      virt.current.scrollBy({ top: e.deltaY });
+      virt.current?.scrollBy({ top: e.deltaY });
     };
-    const el = document.getElementById("virt-box");
-    el.addEventListener("wheel", wheel, { passive: false });
-    return () => el.removeEventListener("wheel", wheel);
-  }, [ready]);
+    currentRef.addEventListener("wheel", wheel, { passive: false });
+    return () => {
+      if (currentRef) {
+        currentRef.removeEventListener("wheel", wheel);
+      }
+    };
+  }, [boot]);
 
   if (!path) return <main className="viewer center">select a log</main>;
-  if (!ready) return <main className="viewer center">loading…</main>;
+  if (!boot) return <main className="viewer center">loading…</main>;
 
   return (
     <main
@@ -295,7 +297,7 @@ export default function LogViewer({ path }) {
               border: "2px solid #777",
               borderTop: "2px solid #fff",
               borderRadius: "50%",
-              animation: "spin 0.8s linear infinite",
+              animation: "spin .8s linear infinite",
             }}
           />
         ) : (
@@ -310,7 +312,7 @@ export default function LogViewer({ path }) {
       </nav>
 
       <div
-        id="virt-box"
+        ref={boxRef}
         style={{ flex: 1, position: "relative" }}
       >
         <div
@@ -330,10 +332,10 @@ export default function LogViewer({ path }) {
             onPointerDown={startDrag}
             style={{
               position: "absolute",
-              top: `calc(50% - ${HANDLE_H / 2}px)`,
+              top: `calc(50% - ${HANDLE / 2}px)`,
               left: 4,
               width: 12,
-              height: HANDLE_H,
+              height: HANDLE,
               background: "#888",
               borderRadius: 6,
             }}
@@ -341,7 +343,6 @@ export default function LogViewer({ path }) {
         </div>
 
         <Virtuoso
-          id="virt"
           ref={virt}
           totalCount={windowCount}
           itemContent={Row}
