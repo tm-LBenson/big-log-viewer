@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"embed"
 	"encoding/json"
 	"flag"
@@ -15,7 +16,10 @@ import (
 	"github.com/tm-LBenson/big-log-viewer/internal/indexer"
 )
 
-const defaultRoot = "./logs"
+const (
+	defaultRoot = "./logs"
+	group       = 256
+)
 
 var rootDir string
 var current *indexer.File
@@ -78,7 +82,7 @@ func openFile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	current = f
-	writeJSON(w, struct{ Lines int }{len(f.Offsets)})
+	writeJSON(w, struct{ Lines int }{f.Lines})
 }
 
 func chunk(w http.ResponseWriter, r *http.Request) {
@@ -91,7 +95,7 @@ func chunk(w http.ResponseWriter, r *http.Request) {
 	if count == 0 {
 		count = 400
 	}
-	lines, err := current.Lines(start, count)
+	lines, err := current.LinesSlice(start, count)
 	if err != nil {
 		http.Error(w, err.Error(), 500)
 		return
@@ -125,18 +129,21 @@ func searchLines(w http.ResponseWriter, r *http.Request) {
 	if limit <= 0 {
 		limit = 500
 	}
-	needle := strings.ToLower(q)
-	m := make([]int, 0, limit)
-	for i := range current.Offsets {
-		if len(m) >= limit {
-			break
-		}
-		line, _ := current.Lines(i, 1)
-		if strings.Contains(strings.ToLower(line[0]), needle) {
-			m = append(m, i)
+	needle := bytes.ToLower([]byte(q))
+	matches := make([]int, 0, limit)
+	for g := 0; g*group < current.Lines && len(matches) < limit; g++ {
+		start := g * group
+		lines, _ := current.LinesSlice(start, group)
+		for i, ln := range lines {
+			if bytes.Contains(bytes.ToLower([]byte(ln)), needle) {
+				matches = append(matches, start+i)
+				if len(matches) == limit {
+					break
+				}
+			}
 		}
 	}
-	writeJSON(w, struct{ Matches []int }{m})
+	writeJSON(w, struct{ Matches []int }{matches})
 }
 
 func getRoot(w http.ResponseWriter, r *http.Request) {

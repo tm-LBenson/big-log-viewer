@@ -7,10 +7,13 @@ import (
 	"os"
 )
 
+const group = 256
+
 type File struct {
-	Path    string
-	File    *os.File
-	Offsets []int64
+	Path  string
+	File  *os.File
+	Base  []int64
+	Lines int
 }
 
 func Open(path string) (*File, error) {
@@ -19,15 +22,18 @@ func Open(path string) (*File, error) {
 		return nil, err
 	}
 
-	var offs []int64
+	var base []int64
 	var pos int64
-	r := bufio.NewReaderSize(f, 1<<20) 
+	var n int
+	r := bufio.NewReaderSize(f, 1<<20)
 
 	for {
 		line, err := r.ReadBytes('\n')
-		offs = append(offs, pos)
+		if n%group == 0 {
+			base = append(base, pos)
+		}
 		pos += int64(len(line))
-
+		n++
 		if err == io.EOF {
 			break
 		}
@@ -38,38 +44,41 @@ func Open(path string) (*File, error) {
 	}
 
 	return &File{
-		Path:    path,
-		File:    f,
-		Offsets: offs,
+		Path:  path,
+		File:  f,
+		Base:  base,
+		Lines: n,
 	}, nil
 }
 
-func (lf *File) Lines(start, count int) ([]string, error) {
-	if start < 0 || start >= len(lf.Offsets) {
+func (lf *File) LinesSlice(start, count int) ([]string, error) {
+	if start < 0 || start >= lf.Lines {
 		return nil, fmt.Errorf("start out of range")
 	}
 	end := start + count
-	if end > len(lf.Offsets) {
-		end = len(lf.Offsets)
+	if end > lf.Lines {
+		end = lf.Lines
 	}
 	out := make([]string, end-start)
 
-	for i := start; i < end; i++ {
-		beg := lf.Offsets[i]
-		var nxt int64
-		if i+1 < len(lf.Offsets) {
-			nxt = lf.Offsets[i+1]
-		} else { // last line
-			var err error
-			if nxt, err = lf.File.Seek(0, io.SeekEnd); err != nil {
-				return nil, err
-			}
-		}
-		buf := make([]byte, nxt-beg)
-		if _, err := lf.File.ReadAt(buf, beg); err != nil {
+	grp := start / group
+	pos := lf.Base[grp]
+	if _, err := lf.File.Seek(pos, io.SeekStart); err != nil {
+		return nil, err
+	}
+	r := bufio.NewReaderSize(lf.File, 1<<20)
+
+	for i := grp * group; i < end; i++ {
+		line, err := r.ReadBytes('\n')
+		if err != nil && err != io.EOF {
 			return nil, err
 		}
-		out[i-start] = string(buf)
+		if i >= start {
+			out[i-start] = string(line)
+		}
+		if err == io.EOF || i+1 == end {
+			break
+		}
 	}
 	return out, nil
 }
