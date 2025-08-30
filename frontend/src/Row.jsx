@@ -1,7 +1,7 @@
 import { ROW } from "./constants";
 import useSearch from "./useSearch";
 
-export default function Row(i) {
+export default function Row({ i }) {
   const { abs, getLine, hl, matches, cur, raw } = useSearch();
   const txt = getLine(i);
   const n = abs(i);

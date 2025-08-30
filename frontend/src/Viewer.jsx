@@ -38,8 +38,12 @@ export default function Viewer({ virt, lines }) {
         <Virtuoso
           ref={virt}
           totalCount={lines.windowCount}
-          itemContent={Row}
-          data={lines.tick}
+          itemContent={(index) => (
+            <Row
+              i={index}
+              tick={lines.tick}
+            />
+          )}
           style={{ height: "100%", width: "100%", paddingRight: 20 }}
           overscan={KEEP * ROW}
           rangeChanged={lines.handleRange}
