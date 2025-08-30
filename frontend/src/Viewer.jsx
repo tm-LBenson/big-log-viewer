@@ -39,6 +39,7 @@ export default function Viewer({ virt, lines }) {
           ref={virt}
           totalCount={lines.windowCount}
           itemContent={Row}
+          data={lines.tick}
           style={{ height: "100%", width: "100%", paddingRight: 20 }}
           overscan={KEEP * ROW}
           rangeChanged={lines.handleRange}

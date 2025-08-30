@@ -14,6 +14,7 @@ export default function useLines(path, virt) {
   const [ready, setReady] = useState(false);
   const [lineCount, setLineCount] = useState(0);
   const [windowCount, setWindowCount] = useState(WINDOW_MAX);
+  const [tick, setTick] = useState(0);
 
   const base = useRef(0);
   const cache = useRef(new Map());
@@ -38,6 +39,7 @@ export default function useLines(path, virt) {
         .then((lines) => {
           cache.current.set(p, lines);
           pending.current.delete(p);
+           setTick((t) => t + 1);
         });
     },
     [lineCount],
@@ -183,6 +185,7 @@ export default function useLines(path, virt) {
   };
 
   return {
+    tick,
     ready,
     windowCount,
     boxRef,
