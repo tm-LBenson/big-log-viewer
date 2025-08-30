@@ -1,3 +1,4 @@
+// main.go
 package main
 
 import (
@@ -12,17 +13,18 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 
 	"github.com/tm-LBenson/big-log-viewer/internal/indexer"
 )
 
-const (
-	defaultRoot = "./logs"
-	group       = 256
-)
+const defaultRoot = "./logs"
 
-var rootDir string
-var current *indexer.File
+var (
+	rootDir string
+	current *indexer.File
+	mu      sync.RWMutex
+)
 
 //go:embed dist/*
 var dist embed.FS
@@ -76,17 +78,34 @@ func openFile(w http.ResponseWriter, r *http.Request) {
 	if !filepath.IsAbs(path) {
 		path = filepath.Join(rootDir, path)
 	}
-	f, err := indexer.Open(path)
+	abs, _ := filepath.Abs(path)
+	// optional sandbox
+	if !withinRoot(abs) {
+		http.Error(w, "path outside root", 403)
+		return
+	}
+
+	f, err := indexer.Open(abs)
 	if err != nil {
 		http.Error(w, err.Error(), 500)
 		return
 	}
+
+	mu.Lock()
+	if current != nil {
+		_ = current.Close()
+	}
 	current = f
+	mu.Unlock()
+
 	writeJSON(w, struct{ Lines int }{f.Lines})
 }
 
 func chunk(w http.ResponseWriter, r *http.Request) {
-	if current == nil {
+	mu.RLock()
+	f := current
+	mu.RUnlock()
+	if f == nil {
 		http.Error(w, "no file", 400)
 		return
 	}
@@ -95,7 +114,7 @@ func chunk(w http.ResponseWriter, r *http.Request) {
 	if count == 0 {
 		count = 400
 	}
-	lines, err := current.LinesSlice(start, count)
+	lines, err := f.LinesSlice(start, count)
 	if err != nil {
 		http.Error(w, err.Error(), 500)
 		return
@@ -112,11 +131,19 @@ func raw(w http.ResponseWriter, r *http.Request) {
 	if !filepath.IsAbs(path) {
 		path = filepath.Join(rootDir, path)
 	}
-	http.ServeFile(w, r, path)
+	abs, _ := filepath.Abs(path)
+	if !withinRoot(abs) {
+		http.Error(w, "path outside root", 403)
+		return
+	}
+	http.ServeFile(w, r, abs)
 }
 
 func searchLines(w http.ResponseWriter, r *http.Request) {
-	if current == nil {
+	mu.RLock()
+	f := current
+	mu.RUnlock()
+	if f == nil {
 		http.Error(w, "open a file first", 400)
 		return
 	}
@@ -131,9 +158,10 @@ func searchLines(w http.ResponseWriter, r *http.Request) {
 	}
 	needle := bytes.ToLower([]byte(q))
 	matches := make([]int, 0, limit)
-	for g := 0; g*group < current.Lines && len(matches) < limit; g++ {
-		start := g * group
-		lines, _ := current.LinesSlice(start, group)
+
+	for g := 0; g*indexer.Group < f.Lines && len(matches) < limit; g++ {
+		start := g * indexer.Group
+		lines, _ := f.LinesSlice(start, indexer.Group)
 		for i, ln := range lines {
 			if bytes.Contains(bytes.ToLower([]byte(ln)), needle) {
 				matches = append(matches, start+i)
@@ -160,12 +188,20 @@ func setRoot(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "bad json", 400)
 		return
 	}
-	if info, err := os.Stat(req.Path); err != nil || !info.IsDir() {
+	info, err := os.Stat(req.Path)
+	if err != nil || !info.IsDir() {
 		http.Error(w, "folder not found", 400)
 		return
 	}
 	abs, _ := filepath.Abs(req.Path)
+
+	mu.Lock()
+	if current != nil {
+		_ = current.Close()
+		current = nil
+	}
 	rootDir = abs
+	mu.Unlock()
 }
 
 func writeJSON(w http.ResponseWriter, v any) {
@@ -177,4 +213,15 @@ func atoi(s string) int {
 	var n int
 	fmt.Sscanf(s, "%d", &n)
 	return n
+}
+
+func withinRoot(abs string) bool {
+	rel, err := filepath.Rel(rootDir, abs)
+	if err != nil {
+		return false
+	}
+	if rel == ".." || strings.HasPrefix(rel, ".."+string(os.PathSeparator)) {
+		return false
+	}
+	return true
 }

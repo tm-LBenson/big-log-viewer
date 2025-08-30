@@ -4,10 +4,11 @@ import (
 	"bufio"
 	"fmt"
 	"io"
+	"math"
 	"os"
 )
 
-const group = 256
+const Group = 256
 
 type File struct {
 	Path  string
@@ -22,18 +23,23 @@ func Open(path string) (*File, error) {
 		return nil, err
 	}
 
-	var base []int64
-	var pos int64
-	var n int
+	base := make([]int64, 0, 1024)
 	r := bufio.NewReaderSize(f, 1<<20)
 
+	var pos int64
+	var n int
+
 	for {
-		line, err := r.ReadBytes('\n')
-		if n%group == 0 {
-			base = append(base, pos)
+		b, err := r.ReadBytes('\n')
+
+		if len(b) > 0 {
+			if n%Group == 0 {
+				base = append(base, pos)
+			}
+			pos += int64(len(b))
+			n++
 		}
-		pos += int64(len(line))
-		n++
+
 		if err == io.EOF {
 			break
 		}
@@ -51,6 +57,13 @@ func Open(path string) (*File, error) {
 	}, nil
 }
 
+func (lf *File) Close() error {
+	if lf.File != nil {
+		return lf.File.Close()
+	}
+	return nil
+}
+
 func (lf *File) LinesSlice(start, count int) ([]string, error) {
 	if start < 0 || start >= lf.Lines {
 		return nil, fmt.Errorf("start out of range")
@@ -61,14 +74,16 @@ func (lf *File) LinesSlice(start, count int) ([]string, error) {
 	}
 	out := make([]string, end-start)
 
-	grp := start / group
-	pos := lf.Base[grp]
-	if _, err := lf.File.Seek(pos, io.SeekStart); err != nil {
-		return nil, err
+	grp := start / Group
+	if grp >= len(lf.Base) {
+		return nil, fmt.Errorf("index out of range")
 	}
-	r := bufio.NewReaderSize(lf.File, 1<<20)
+	pos := lf.Base[grp]
 
-	for i := grp * group; i < end; i++ {
+	sr := io.NewSectionReader(lf.File, pos, math.MaxInt64)
+	r := bufio.NewReaderSize(sr, 1<<20)
+
+	for i := grp * Group; i < end; i++ {
 		line, err := r.ReadBytes('\n')
 		if err != nil && err != io.EOF {
 			return nil, err
@@ -76,7 +91,7 @@ func (lf *File) LinesSlice(start, count int) ([]string, error) {
 		if i >= start {
 			out[i-start] = string(line)
 		}
-		if err == io.EOF || i+1 == end {
+		if err == io.EOF {
 			break
 		}
 	}
