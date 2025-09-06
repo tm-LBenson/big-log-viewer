@@ -1,4 +1,3 @@
-// main.go
 package main
 
 import (
@@ -49,6 +48,7 @@ func main() {
 	http.HandleFunc("/api/search", searchLines)
 	http.HandleFunc("/api/root", getRoot)
 	http.HandleFunc("/api/root/set", setRoot)
+	http.HandleFunc("/api/range", rangeLines)
 
 	fmt.Println("serving http://localhost:8844")
 	log.Fatal(http.ListenAndServe(":8844", nil))
@@ -79,25 +79,21 @@ func openFile(w http.ResponseWriter, r *http.Request) {
 		path = filepath.Join(rootDir, path)
 	}
 	abs, _ := filepath.Abs(path)
-	// optional sandbox
 	if !withinRoot(abs) {
 		http.Error(w, "path outside root", 403)
 		return
 	}
-
 	f, err := indexer.Open(abs)
 	if err != nil {
 		http.Error(w, err.Error(), 500)
 		return
 	}
-
 	mu.Lock()
 	if current != nil {
 		_ = current.Close()
 	}
 	current = f
 	mu.Unlock()
-
 	writeJSON(w, struct{ Lines int }{f.Lines})
 }
 
@@ -158,7 +154,6 @@ func searchLines(w http.ResponseWriter, r *http.Request) {
 	}
 	needle := bytes.ToLower([]byte(q))
 	matches := make([]int, 0, limit)
-
 	for g := 0; g*indexer.Group < f.Lines && len(matches) < limit; g++ {
 		start := g * indexer.Group
 		lines, _ := f.LinesSlice(start, indexer.Group)
@@ -194,7 +189,6 @@ func setRoot(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	abs, _ := filepath.Abs(req.Path)
-
 	mu.Lock()
 	if current != nil {
 		_ = current.Close()
@@ -202,6 +196,47 @@ func setRoot(w http.ResponseWriter, r *http.Request) {
 	}
 	rootDir = abs
 	mu.Unlock()
+}
+
+func rangeLines(w http.ResponseWriter, r *http.Request) {
+	mu.RLock()
+	f := current
+	mu.RUnlock()
+	if f == nil {
+		http.Error(w, "no file", 400)
+		return
+	}
+
+	start := atoi(r.URL.Query().Get("start"))
+	end := atoi(r.URL.Query().Get("end"))
+	count := atoi(r.URL.Query().Get("count"))
+	if count > 0 && end == 0 {
+		end = start + count
+	}
+
+	if start < 0 {
+		start = 0
+	}
+	if end <= 0 || end > f.Lines {
+		end = f.Lines
+	}
+	if end < start {
+		end = start
+	}
+
+	name := r.URL.Query().Get("name")
+	if name == "" {
+		name = fmt.Sprintf("lines_%d-%d.txt", start+1, end)
+	}
+	if r.URL.Query().Get("download") == "1" {
+		w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%q", name))
+	}
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+
+	if err := f.WriteRange(w, start, end); err != nil {
+		http.Error(w, err.Error(), 500)
+		return
+	}
 }
 
 func writeJSON(w http.ResponseWriter, v any) {

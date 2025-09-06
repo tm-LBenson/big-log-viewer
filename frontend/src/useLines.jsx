@@ -39,7 +39,7 @@ export default function useLines(path, virt) {
         .then((lines) => {
           cache.current.set(p, lines);
           pending.current.delete(p);
-           setTick((t) => t + 1);
+          setTick((t) => t + 1);
         });
     },
     [lineCount],
@@ -187,6 +187,7 @@ export default function useLines(path, virt) {
   return {
     tick,
     ready,
+    count: lineCount,
     windowCount,
     boxRef,
     trackRef,

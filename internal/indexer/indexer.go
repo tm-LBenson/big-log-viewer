@@ -31,7 +31,6 @@ func Open(path string) (*File, error) {
 
 	for {
 		b, err := r.ReadBytes('\n')
-
 		if len(b) > 0 {
 			if n%Group == 0 {
 				base = append(base, pos)
@@ -39,7 +38,6 @@ func Open(path string) (*File, error) {
 			pos += int64(len(b))
 			n++
 		}
-
 		if err == io.EOF {
 			break
 		}
@@ -96,4 +94,44 @@ func (lf *File) LinesSlice(start, count int) ([]string, error) {
 		}
 	}
 	return out, nil
+}
+
+func (lf *File) WriteRange(w io.Writer, start, end int) error {
+	if start < 0 {
+		start = 0
+	}
+	if end > lf.Lines {
+		end = lf.Lines
+	}
+	if end < start {
+		end = start
+	}
+
+	grp := start / Group
+	if grp >= len(lf.Base) && !(start == 0 && len(lf.Base) == 0) {
+		return fmt.Errorf("index out of range")
+	}
+	var pos int64
+	if len(lf.Base) > 0 {
+		pos = lf.Base[grp]
+	}
+
+	sr := io.NewSectionReader(lf.File, pos, math.MaxInt64)
+	r := bufio.NewReaderSize(sr, 1<<20)
+
+	for i := grp * Group; i < end; i++ {
+		line, err := r.ReadBytes('\n')
+		if err != nil && err != io.EOF {
+			return err
+		}
+		if i >= start {
+			if _, err := w.Write(line); err != nil {
+				return err
+			}
+		}
+		if err == io.EOF {
+			break
+		}
+	}
+	return nil
 }

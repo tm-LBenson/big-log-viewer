@@ -15,6 +15,7 @@ export default function LogViewer({ path }) {
       goLine={lines.goLine}
       abs={lines.abs}
       getLine={lines.getLine}
+      count={lines.count}
     >
       <Viewer
         virt={virt}
