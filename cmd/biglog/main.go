@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 
@@ -22,18 +23,29 @@ const defaultRoot = "./logs"
 var (
 	rootDir string
 	current *indexer.File
-	mu      sync.RWMutex
+
+	mu sync.RWMutex
+
+	// extension config
+	defaultExt = []string{
+		".log", ".txt", ".html", ".htm", ".csv", ".tsv",
+		".json", ".ndjson", ".xml", ".md", ".js", ".css",
+	}
+	extSet = make(map[string]struct{})
+	extMu  sync.RWMutex
 )
 
 //go:embed dist/*
 var dist embed.FS
 
 func main() {
-	flag.StringVar(&rootDir, "logdir", defaultRoot, "folder containing .html logs")
+	flag.StringVar(&rootDir, "logdir", defaultRoot, "folder containing text logs")
 	flag.Parse()
 	abs, _ := filepath.Abs(rootDir)
 	rootDir = abs
 	_ = os.MkdirAll(rootDir, 0o755)
+
+	setExtensions(defaultExt, "replace")
 
 	sub, err := fs.Sub(dist, "dist")
 	if err != nil {
@@ -50,23 +62,163 @@ func main() {
 	http.HandleFunc("/api/root/set", setRoot)
 	http.HandleFunc("/api/range", rangeLines)
 
+	http.HandleFunc("/api/extensions", extensionsHandler)
+
 	fmt.Println("serving http://localhost:8844")
 	log.Fatal(http.ListenAndServe(":8844", nil))
 }
 
 func listDir(w http.ResponseWriter, r *http.Request) {
 	var out []string
+
+	extMu.RLock()
+	curExtSet := cloneExtSet()
+	allowAllText := hasWildcard(curExtSet)
+	extMu.RUnlock()
+
 	filepath.WalkDir(rootDir, func(p string, d os.DirEntry, err error) error {
 		if err != nil || d.IsDir() {
 			return nil
 		}
-		if strings.HasSuffix(strings.ToLower(p), ".html") {
+		if shouldIncludeFile(p, curExtSet, allowAllText) {
 			rel, _ := filepath.Rel(rootDir, p)
 			out = append(out, rel)
 		}
 		return nil
 	})
 	writeJSON(w, out)
+}
+
+type extensionsReq struct {
+	Extensions []string `json:"extensions"`
+	Mode       string   `json:"mode"`
+}
+
+type extensionsResp struct {
+	Extensions []string `json:"extensions"`
+	Defaults   []string `json:"defaults"`
+}
+
+func extensionsHandler(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		writeJSON(w, extensionsResp{
+			Extensions: getExtensions(),
+			Defaults:   sortedCopy(defaultExt),
+		})
+	case http.MethodPost:
+		var req extensionsReq
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, "bad json", http.StatusBadRequest)
+			return
+		}
+		mode := strings.ToLower(strings.TrimSpace(req.Mode))
+		if mode != "replace" {
+			mode = "merge"
+		}
+		setExtensions(req.Extensions, mode)
+		writeJSON(w, extensionsResp{
+			Extensions: getExtensions(),
+			Defaults:   sortedCopy(defaultExt),
+		})
+	default:
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+func setExtensions(exts []string, mode string) {
+	norm := normalizeExts(exts)
+
+	extMu.Lock()
+	defer extMu.Unlock()
+
+	if mode == "replace" {
+		clearMap(extSet)
+		for _, e := range normalizeExts(defaultExt) {
+			extSet[e] = struct{}{}
+		}
+		for _, e := range norm {
+			extSet[e] = struct{}{}
+		}
+		return
+	}
+
+	for _, e := range norm {
+		extSet[e] = struct{}{}
+	}
+}
+
+func getExtensions() []string {
+	extMu.RLock()
+	defer extMu.RUnlock()
+	out := make([]string, 0, len(extSet))
+	for e := range extSet {
+		out = append(out, e)
+	}
+	sort.Strings(out)
+	return out
+}
+
+func cloneExtSet() map[string]struct{} {
+	out := make(map[string]struct{}, len(extSet))
+	for k, v := range extSet {
+		out[k] = v
+	}
+	return out
+}
+
+func hasWildcard(m map[string]struct{}) bool {
+	_, ok := m["*"]
+	return ok
+}
+
+func clearMap(m map[string]struct{}) {
+	for k := range m {
+		delete(m, k)
+	}
+}
+
+func normalizeExts(in []string) []string {
+	out := make([]string, 0, len(in))
+	for _, e := range in {
+		e = strings.TrimSpace(strings.ToLower(e))
+		if e == "" {
+			continue
+		}
+
+		if e == "*" {
+			out = append(out, "*")
+			continue
+		}
+		if !strings.HasPrefix(e, ".") {
+			e = "." + e
+		}
+		out = append(out, e)
+	}
+	return out
+}
+
+func sortedCopy(in []string) []string {
+	cp := append([]string(nil), in...)
+	sort.Strings(cp)
+	return cp
+}
+
+func shouldIncludeFile(p string, curExtSet map[string]struct{}, allowAllText bool) bool {
+	ext := strings.ToLower(filepath.Ext(p))
+	if ext == "" {
+		if allowAllText {
+			return isTextBySniff(p)
+		}
+		return false
+	}
+	if _, ok := curExtSet[ext]; ok {
+		return true
+	}
+	if allowAllText {
+		return isTextBySniff(p)
+	}
+	return false
 }
 
 func openFile(w http.ResponseWriter, r *http.Request) {
@@ -256,6 +408,30 @@ func withinRoot(abs string) bool {
 		return false
 	}
 	if rel == ".." || strings.HasPrefix(rel, ".."+string(os.PathSeparator)) {
+		return false
+	}
+	return true
+}
+
+func isTextBySniff(p string) bool {
+	f, err := os.Open(p)
+	if err != nil {
+		return false
+	}
+	defer f.Close()
+	buf := make([]byte, 512)
+	n, _ := f.Read(buf)
+	if n == 0 {
+		return true
+	}
+	ctype := http.DetectContentType(buf[:n])
+	if strings.HasPrefix(ctype, "text/") {
+		return true
+	}
+	if strings.Contains(ctype, "json") || strings.Contains(ctype, "xml") || strings.Contains(ctype, "javascript") {
+		return true
+	}
+	if bytes.IndexByte(buf[:n], 0x00) >= 0 {
 		return false
 	}
 	return true
