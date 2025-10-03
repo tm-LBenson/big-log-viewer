@@ -14,6 +14,7 @@ export default forwardRef(function TrackHandle({ onPointerDown }, ref) {
         height: TRACK_H,
         userSelect: "none",
         zIndex: 10,
+        pointerEvents: "none",
       }}
     >
       <div
@@ -26,6 +27,7 @@ export default forwardRef(function TrackHandle({ onPointerDown }, ref) {
           height: HANDLE,
           background: "#888",
           borderRadius: 6,
+          pointerEvents: "auto",
         }}
       />
     </div>

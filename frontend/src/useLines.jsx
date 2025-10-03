@@ -15,6 +15,7 @@ export default function useLines(path, virt) {
   const [lineCount, setLineCount] = useState(0);
   const [windowCount, setWindowCount] = useState(WINDOW_MAX);
   const [tick, setTick] = useState(0);
+  const [error, setError] = useState("");
 
   const base = useRef(0);
   const cache = useRef(new Map());
@@ -28,18 +29,28 @@ export default function useLines(path, virt) {
   const scrolled = useRef(false);
   const mounted = useRef(false);
 
+  const openCtrl = useRef(null);
+  const pageCtrls = useRef(new Map());
+
   const fetchPage = useCallback(
     (p) => {
       const s = p * PAGE;
       if (s < 0 || s >= lineCount) return;
       if (cache.current.has(p) || pending.current.has(p)) return;
       pending.current.add(p);
-      fetch(`/api/chunk?start=${s}&count=${PAGE}`)
-        .then((r) => r.json())
+      const ctrl = new AbortController();
+      pageCtrls.current.set(p, ctrl);
+      fetch(`/api/chunk?start=${s}&count=${PAGE}`, { signal: ctrl.signal })
+        .then((r) => (r.ok ? r.json() : Promise.reject()))
         .then((lines) => {
-          cache.current.set(p, lines);
-          pending.current.delete(p);
+          if (ctrl.signal.aborted) return;
+          cache.current.set(p, lines || []);
           setTick((t) => t + 1);
+        })
+        .catch(() => {})
+        .finally(() => {
+          pending.current.delete(p);
+          pageCtrls.current.delete(p);
         });
     },
     [lineCount],
@@ -58,37 +69,43 @@ export default function useLines(path, virt) {
     cache.current.clear();
     pending.current.clear();
     setReady(false);
+    setError("");
     base.current = 0;
     if (!path) return;
-    fetch(`/api/open?path=${encodeURIComponent(path)}`)
-      .then((r) => r.json())
+
+    const ctrl = new AbortController();
+    openCtrl.current = ctrl;
+
+    fetch(`/api/open?path=${encodeURIComponent(path)}`, { signal: ctrl.signal })
+      .then((r) => (r.ok ? r.json() : Promise.reject()))
       .then((d) => {
-        setLineCount(d.Lines);
-        setWindowCount(Math.min(WINDOW_MAX, d.Lines));
-        return fetch(`/api/chunk?start=0&count=${PAGE}`);
+        if (ctrl.signal.aborted) return;
+        const total = d.Lines || 0;
+        setLineCount(total);
+        setWindowCount(Math.min(WINDOW_MAX, Math.max(0, total)));
+        return fetch(`/api/chunk?start=0&count=${PAGE}`, {
+          signal: ctrl.signal,
+        });
       })
-      .then((r) => r.json())
+      .then((r) => (r ? (r.ok ? r.json() : Promise.reject()) : []))
       .then((lines) => {
-        cache.current.set(0, lines);
+        if (ctrl.signal.aborted) return;
+        cache.current.set(0, lines || []);
         setReady(true);
+      })
+      .catch(() => {
+        if (ctrl.signal.aborted) return;
+        setError("failed to open file");
+        setReady(false);
       });
+
+    return () => {
+      ctrl.abort();
+    };
   }, [path]);
 
-  useEffect(() => {
-    const node = boxRef.current;
-    if (!ready || !node) return;
-    const wheel = (e) => {
-      e.preventDefault();
-      scrolled.current = true;
-      virt.current?.scrollBy({ top: e.deltaY });
-    };
-    node.addEventListener("wheel", wheel, { passive: false });
-    return () => node.removeEventListener("wheel", wheel);
-  }, [ready, virt]);
-
   const resize = () =>
-    setWindowCount(Math.min(WINDOW_MAX, lineCount - base.current));
-
+    setWindowCount(Math.max(0, Math.min(WINDOW_MAX, lineCount - base.current)));
   const abs = (i) => base.current + i;
 
   const getLine = (i) => {
@@ -96,7 +113,7 @@ export default function useLines(path, virt) {
     if (n >= lineCount) return "";
     const p = Math.floor(n / PAGE);
     const o = n % PAGE;
-    return cache.current.get(p)?.[o] ?? "…";
+    return cache.current.get(p)?.[o] ?? "...";
   };
 
   const goLine = (line) => {
@@ -125,6 +142,7 @@ export default function useLines(path, virt) {
   const goBottom = () => goLine(lineCount - 1);
 
   const handleRange = ({ startIndex, endIndex }) => {
+    scrolled.current = true;
     ensure(abs(startIndex), abs(endIndex));
     if (!mounted.current) {
       mounted.current = true;
@@ -134,14 +152,14 @@ export default function useLines(path, virt) {
     if (startIndex > HALF_WIN && base.current + windowCount < lineCount) {
       base.current += HALF_WIN;
       resize();
-      virt.current.scrollToIndex({
+      virt.current?.scrollToIndex({
         index: startIndex - HALF_WIN,
         align: "start",
       });
     } else if (startIndex < 0 && base.current > 0) {
       base.current = Math.max(0, base.current - HALF_WIN);
       resize();
-      virt.current.scrollToIndex({
+      virt.current?.scrollToIndex({
         index: startIndex + HALF_WIN,
         align: "start",
       });
@@ -152,14 +170,14 @@ export default function useLines(path, virt) {
     if (!last.current) last.current = ts;
     const rows = (drag.current / RANGE) * SPEED * ((ts - last.current) / 1000);
     last.current = ts;
-    if (rows) virt.current.scrollBy({ top: rows * ROW });
+    if (rows) virt.current?.scrollBy({ top: rows * ROW });
     raf.current = requestAnimationFrame(animate);
   };
 
   const startDrag = (e) => {
     e.preventDefault();
     scrolled.current = true;
-
+    if (!trackRef.current) return;
     const mid = trackRef.current.getBoundingClientRect().top + TRACK_H / 2;
 
     const move = (ev) => {
@@ -173,7 +191,9 @@ export default function useLines(path, virt) {
 
     const up = () => {
       drag.current = 0;
-      trackRef.current.firstChild.style.top = `calc(50% - ${HANDLE / 2}px)`;
+      if (trackRef.current) {
+        trackRef.current.firstChild.style.top = `calc(50% - ${HANDLE / 2}px)`;
+      }
       cancelAnimationFrame(raf.current);
       window.removeEventListener("pointermove", move);
       window.removeEventListener("pointerup", up);
@@ -184,9 +204,19 @@ export default function useLines(path, virt) {
     raf.current = requestAnimationFrame(animate);
   };
 
+  useEffect(() => {
+    return () => {
+      if (raf.current) cancelAnimationFrame(raf.current);
+      if (openCtrl.current) openCtrl.current.abort();
+      pageCtrls.current.forEach((c) => c.abort());
+      pageCtrls.current.clear();
+    };
+  }, []);
+
   return {
     tick,
     ready,
+    error,
     count: lineCount,
     windowCount,
     boxRef,

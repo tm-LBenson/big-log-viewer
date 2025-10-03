@@ -14,6 +14,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/tm-LBenson/big-log-viewer/internal/indexer"
 )
@@ -26,7 +27,6 @@ var (
 
 	mu sync.RWMutex
 
-	// extension config
 	defaultExt = []string{
 		".log", ".txt", ".html", ".htm", ".csv", ".tsv",
 		".json", ".ndjson", ".xml", ".md", ".js", ".css",
@@ -39,8 +39,10 @@ var (
 var dist embed.FS
 
 func main() {
+	addr := flag.String("addr", "127.0.0.1:8844", "listen address")
 	flag.StringVar(&rootDir, "logdir", defaultRoot, "folder containing text logs")
 	flag.Parse()
+
 	abs, _ := filepath.Abs(rootDir)
 	rootDir = abs
 	_ = os.MkdirAll(rootDir, 0o755)
@@ -61,11 +63,17 @@ func main() {
 	http.HandleFunc("/api/root", getRoot)
 	http.HandleFunc("/api/root/set", setRoot)
 	http.HandleFunc("/api/range", rangeLines)
-
 	http.HandleFunc("/api/extensions", extensionsHandler)
 
-	fmt.Println("serving http://localhost:8844")
-	log.Fatal(http.ListenAndServe(":8844", nil))
+	fmt.Println("serving http://" + *addr)
+	srv := &http.Server{
+		Addr:         *addr,
+		ReadTimeout:  15 * time.Second,
+		WriteTimeout: 30 * time.Second,
+		IdleTimeout:  60 * time.Second,
+		Handler:      nil,
+	}
+	log.Fatal(srv.ListenAndServe())
 }
 
 func listDir(w http.ResponseWriter, r *http.Request) {
@@ -185,7 +193,6 @@ func normalizeExts(in []string) []string {
 		if e == "" {
 			continue
 		}
-
 		if e == "*" {
 			out = append(out, "*")
 			continue
@@ -231,6 +238,7 @@ func openFile(w http.ResponseWriter, r *http.Request) {
 		path = filepath.Join(rootDir, path)
 	}
 	abs, _ := filepath.Abs(path)
+	abs, _ = filepath.EvalSymlinks(abs)
 	if !withinRoot(abs) {
 		http.Error(w, "path outside root", 403)
 		return
@@ -252,17 +260,23 @@ func openFile(w http.ResponseWriter, r *http.Request) {
 func chunk(w http.ResponseWriter, r *http.Request) {
 	mu.RLock()
 	f := current
-	mu.RUnlock()
 	if f == nil {
+		mu.RUnlock()
 		http.Error(w, "no file", 400)
 		return
 	}
 	start := atoi(r.URL.Query().Get("start"))
 	count := atoi(r.URL.Query().Get("count"))
-	if count == 0 {
+	if count <= 0 {
 		count = 400
 	}
+	if f.Lines == 0 {
+		mu.RUnlock()
+		writeJSON(w, []string{})
+		return
+	}
 	lines, err := f.LinesSlice(start, count)
+	mu.RUnlock()
 	if err != nil {
 		http.Error(w, err.Error(), 500)
 		return
@@ -280,6 +294,7 @@ func raw(w http.ResponseWriter, r *http.Request) {
 		path = filepath.Join(rootDir, path)
 	}
 	abs, _ := filepath.Abs(path)
+	abs, _ = filepath.EvalSymlinks(abs)
 	if !withinRoot(abs) {
 		http.Error(w, "path outside root", 403)
 		return
@@ -290,13 +305,14 @@ func raw(w http.ResponseWriter, r *http.Request) {
 func searchLines(w http.ResponseWriter, r *http.Request) {
 	mu.RLock()
 	f := current
-	mu.RUnlock()
 	if f == nil {
+		mu.RUnlock()
 		http.Error(w, "open a file first", 400)
 		return
 	}
 	q := r.URL.Query().Get("q")
 	if q == "" {
+		mu.RUnlock()
 		http.Error(w, "q param required", 400)
 		return
 	}
@@ -308,7 +324,10 @@ func searchLines(w http.ResponseWriter, r *http.Request) {
 	matches := make([]int, 0, limit)
 	for g := 0; g*indexer.Group < f.Lines && len(matches) < limit; g++ {
 		start := g * indexer.Group
-		lines, _ := f.LinesSlice(start, indexer.Group)
+		lines, err := f.LinesSlice(start, indexer.Group)
+		if err != nil {
+			break
+		}
 		for i, ln := range lines {
 			if bytes.Contains(bytes.ToLower([]byte(ln)), needle) {
 				matches = append(matches, start+i)
@@ -318,6 +337,7 @@ func searchLines(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
+	mu.RUnlock()
 	writeJSON(w, struct{ Matches []int }{matches})
 }
 
@@ -348,13 +368,14 @@ func setRoot(w http.ResponseWriter, r *http.Request) {
 	}
 	rootDir = abs
 	mu.Unlock()
+	writeJSON(w, struct{ Path string }{rootDir})
 }
 
 func rangeLines(w http.ResponseWriter, r *http.Request) {
 	mu.RLock()
 	f := current
-	mu.RUnlock()
 	if f == nil {
+		mu.RUnlock()
 		http.Error(w, "no file", 400)
 		return
 	}
@@ -365,7 +386,6 @@ func rangeLines(w http.ResponseWriter, r *http.Request) {
 	if count > 0 && end == 0 {
 		end = start + count
 	}
-
 	if start < 0 {
 		start = 0
 	}
@@ -385,7 +405,9 @@ func rangeLines(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 
-	if err := f.WriteRange(w, start, end); err != nil {
+	err := f.WriteRange(w, start, end)
+	mu.RUnlock()
+	if err != nil {
 		http.Error(w, err.Error(), 500)
 		return
 	}
@@ -403,7 +425,15 @@ func atoi(s string) int {
 }
 
 func withinRoot(abs string) bool {
-	rel, err := filepath.Rel(rootDir, abs)
+	rootReal, err := filepath.EvalSymlinks(rootDir)
+	if err != nil {
+		return false
+	}
+	pathReal, err := filepath.EvalSymlinks(abs)
+	if err != nil {
+		return false
+	}
+	rel, err := filepath.Rel(rootReal, pathReal)
 	if err != nil {
 		return false
 	}

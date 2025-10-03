@@ -63,8 +63,11 @@ func (lf *File) Close() error {
 }
 
 func (lf *File) LinesSlice(start, count int) ([]string, error) {
-	if start < 0 || start >= lf.Lines {
+	if start < 0 || start > lf.Lines {
 		return nil, fmt.Errorf("start out of range")
+	}
+	if start == lf.Lines {
+		return []string{}, nil
 	}
 	end := start + count
 	if end > lf.Lines {

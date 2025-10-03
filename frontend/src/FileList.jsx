@@ -1,4 +1,13 @@
-import { useEffect, useState, useMemo, useRef } from "react";
+import {
+  useEffect,
+  useState,
+  useMemo,
+  useRef,
+  forwardRef,
+  useImperativeHandle,
+  useLayoutEffect,
+} from "react";
+import { createPortal } from "react-dom";
 import "./App.css";
 
 const build = (list) => {
@@ -19,8 +28,8 @@ const sortFiles = (files, mode, mtime) => {
     a.n.localeCompare(b.n, undefined, { numeric: true, sensitivity: "base" });
   const byNameDesc = (a, b) => -byNameAsc(a, b);
   const byMtimeDesc = (a, b) => {
-    const ma = mtime.get(a.p);
-    const mb = mtime.get(b.p);
+    const ma = mtime.get(a.p),
+      mb = mtime.get(b.p);
     if (ma == null && mb == null) return byNameAsc(a, b);
     if (ma == null) return 1;
     if (mb == null) return -1;
@@ -28,8 +37,8 @@ const sortFiles = (files, mode, mtime) => {
     return byNameAsc(a, b);
   };
   const byMtimeAsc = (a, b) => {
-    const ma = mtime.get(a.p);
-    const mb = mtime.get(b.p);
+    const ma = mtime.get(a.p),
+      mb = mtime.get(b.p);
     if (ma == null && mb == null) return byNameAsc(a, b);
     if (ma == null) return 1;
     if (mb == null) return -1;
@@ -106,7 +115,7 @@ function Folder({
         files.map((f) => (
           <Row
             key={f.p}
-            icon="📄 "
+            icon="📄"
             label={f.n}
             depth={d + 1}
             sel={sel === f.p}
@@ -133,30 +142,43 @@ function Folder({
   );
 }
 
-export default function FileList({ sel, onSel }) {
+export default forwardRef(function FileList({ sel, onSel, onLoaded }, ref) {
   const [tree, setTree] = useState({ d: {}, f: [] });
   const [paths, setPaths] = useState([]);
   const [open, setOpen] = useState({});
-  const [modal, setModal] = useState(false);
-  const [pathInput, setPathInput] = useState("");
   const [loading, setLoading] = useState(true);
   const [sortOpen, setSortOpen] = useState(false);
   const [sortMode, setSortMode] = useState("mtime-desc");
   const [mtimeMap, setMtimeMap] = useState(new Map());
+  const [rootLabel, setRootLabel] = useState("logs");
   const sortBtnRef = useRef(null);
+  const [menuPos, setMenuPos] = useState({ top: 0, left: 0 });
+
+  const fetchRoot = async () => {
+    try {
+      const d = await fetch("/api/root").then((r) => r.json());
+      const p = d.Path || "";
+      setRootLabel(p ? p.split(/[\\/]/).pop() : "logs");
+    } catch {
+      //
+    }
+  };
+
+  const fetchList = async () => {
+    setLoading(true);
+    await fetchRoot();
+    const list = await fetch("/api/list")
+      .then((r) => r.json())
+      .catch(() => []);
+    const arr = Array.isArray(list) ? list : [];
+    setPaths(arr);
+    setTree(build(arr));
+    setLoading(false);
+    onLoaded?.(arr);
+  };
 
   useEffect(() => {
-    fetch("/api/root")
-      .then((r) => r.json())
-      .then((d) => setPathInput(d.Path || ""));
-    fetch("/api/list")
-      .then((r) => r.json())
-      .then((l) => {
-        const list = Array.isArray(l) ? l : [];
-        setPaths(list);
-        setTree(build(list));
-        setLoading(false);
-      });
+    fetchList();
   }, []);
 
   useEffect(() => {
@@ -166,8 +188,8 @@ export default function FileList({ sel, onSel }) {
     let idx = 0;
     const next = async () => {
       while (idx < paths.length) {
-        const start = idx;
-        const end = Math.min(paths.length, start + limit);
+        const start = idx,
+          end = Math.min(paths.length, start + limit);
         idx = end;
         await Promise.all(
           paths.slice(start, end).map(async (p) => {
@@ -208,27 +230,22 @@ export default function FileList({ sel, onSel }) {
 
   useEffect(() => {
     const onDocClick = (e) => {
-      if (
-        sortOpen &&
-        sortBtnRef.current &&
-        !sortBtnRef.current.contains(e.target)
-      )
-        setSortOpen(false);
+      const menuEl = document.getElementById("sort-menu");
+      const inMenu = menuEl && menuEl.contains(e.target);
+      const inBtn = sortBtnRef.current && sortBtnRef.current.contains(e.target);
+      if (!inMenu && !inBtn) setSortOpen(false);
     };
     document.addEventListener("mousedown", onDocClick);
     return () => document.removeEventListener("mousedown", onDocClick);
+  }, []);
+
+  useLayoutEffect(() => {
+    if (!sortOpen || !sortBtnRef.current) return;
+    const r = sortBtnRef.current.getBoundingClientRect();
+    setMenuPos({ top: r.bottom + 6, left: r.left });
   }, [sortOpen]);
 
-  const save = async () => {
-    await fetch("/api/root/set", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ Path: pathInput }),
-    });
-    window.location.reload();
-  };
-
-  const rootLabel = pathInput ? pathInput.split(/[\\/]/).pop() : "logs";
+  useImperativeHandle(ref, () => ({ reload: () => fetchList() }));
 
   return (
     <>
@@ -236,9 +253,9 @@ export default function FileList({ sel, onSel }) {
         <div className="toolbar">
           <button
             className="btn btn--primary"
-            onClick={() => setModal(true)}
+            onClick={() => fetchList()}
           >
-            Choose folder…
+            Refresh
           </button>
           <div
             style={{ position: "relative" }}
@@ -250,43 +267,6 @@ export default function FileList({ sel, onSel }) {
             >
               Sort…
             </button>
-            {sortOpen && (
-              <div className="menu">
-                <MenuItem
-                  label="Modified (newest first)"
-                  active={sortMode === "mtime-desc"}
-                  onClick={() => {
-                    setSortMode("mtime-desc");
-                    setSortOpen(false);
-                  }}
-                />
-                <MenuItem
-                  label="Modified (oldest first)"
-                  active={sortMode === "mtime-asc"}
-                  onClick={() => {
-                    setSortMode("mtime-asc");
-                    setSortOpen(false);
-                  }}
-                />
-                <div style={{ height: 6 }} />
-                <MenuItem
-                  label="Name (A→Z)"
-                  active={sortMode === "name-asc"}
-                  onClick={() => {
-                    setSortMode("name-asc");
-                    setSortOpen(false);
-                  }}
-                />
-                <MenuItem
-                  label="Name (Z→A)"
-                  active={sortMode === "name-desc"}
-                  onClick={() => {
-                    setSortMode("name-desc");
-                    setSortOpen(false);
-                  }}
-                />
-              </div>
-            )}
           </div>
         </div>
 
@@ -320,61 +300,57 @@ export default function FileList({ sel, onSel }) {
         )}
       </aside>
 
-      {modal && (
-        <div
-          style={{
-            position: "fixed",
-            inset: 0,
-            background: "rgba(0,0,0,.5)",
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "center",
-            zIndex: 1000,
-          }}
-        >
+      {sortOpen &&
+        createPortal(
           <div
+            id="sort-menu"
+            className="menu"
             style={{
-              background: "#fff",
-              color: "#000",
-              padding: 20,
-              borderRadius: 12,
-              width: 420,
+              position: "fixed",
+              top: menuPos.top,
+              left: menuPos.left,
+              zIndex: 10000,
             }}
           >
-            <h3 style={{ marginTop: 0 }}>Select log folder</h3>
-            <input
-              style={{
-                width: "100%",
-                marginBottom: 12,
-                padding: "8px 10px",
-                borderRadius: 8,
-                border: "1px solid #d1d5db",
+            <MenuItem
+              label="Modified (newest first)"
+              active={sortMode === "mtime-desc"}
+              onClick={() => {
+                setSortMode("mtime-desc");
+                setSortOpen(false);
               }}
-              value={pathInput}
-              onChange={(e) => setPathInput(e.target.value)}
             />
-            <div
-              style={{ display: "flex", justifyContent: "flex-end", gap: 8 }}
-            >
-              <button
-                className="btn"
-                onClick={() => setModal(false)}
-              >
-                Cancel
-              </button>
-              <button
-                className="btn btn--primary"
-                onClick={save}
-              >
-                Save
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
+            <MenuItem
+              label="Modified (oldest first)"
+              active={sortMode === "mtime-asc"}
+              onClick={() => {
+                setSortMode("mtime-asc");
+                setSortOpen(false);
+              }}
+            />
+            <div style={{ height: 6 }} />
+            <MenuItem
+              label="Name (A→Z)"
+              active={sortMode === "name-asc"}
+              onClick={() => {
+                setSortMode("name-asc");
+                setSortOpen(false);
+              }}
+            />
+            <MenuItem
+              label="Name (Z→A)"
+              active={sortMode === "name-desc"}
+              onClick={() => {
+                setSortMode("name-desc");
+                setSortOpen(false);
+              }}
+            />
+          </div>,
+          document.body,
+        )}
     </>
   );
-}
+});
 
 function MenuItem({ label, active, onClick }) {
   return (

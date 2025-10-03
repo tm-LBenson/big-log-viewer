@@ -8,7 +8,8 @@ export default function LogViewer({ path }) {
   const lines = useLines(path, virt);
 
   if (!path) return <main className="viewer center">select a log</main>;
-  if (!lines.ready) return <main className="viewer center">loading…</main>;
+  if (lines.error) return <main className="viewer center">{lines.error}</main>;
+  if (!lines.ready) return <main className="viewer center">loading...</main>;
 
   return (
     <SearchProvider
