@@ -330,3 +330,31 @@ body.modal-open .menu {
   background: #6b7280;
   color: #fff;
 }
+.idhub-time {
+  color: var(--text-weak);
+  margin-right: 8px;
+}
+.idhub-level {
+  display: inline-block;
+  font-size: 11px;
+  line-height: 1;
+  padding: 3px 6px;
+  border-radius: 6px;
+  margin-right: 8px;
+}
+.idhub-logger {
+  color: var(--text-weak);
+  margin-right: 8px;
+}
+.idhub-msg {
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.idhub-msg pre {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 8px;
+  display: inline-block;
+  margin: 0;
+}

@@ -21,6 +21,7 @@ export default function LogViewer({ path }) {
       <Viewer
         virt={virt}
         lines={lines}
+        path={path}
       />
     </SearchProvider>
   );

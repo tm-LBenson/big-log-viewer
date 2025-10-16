@@ -4,9 +4,10 @@ import { ROW, KEEP } from "./constants";
 import useSearch from "./useSearch";
 import TrackHandle from "./TrackHandle";
 import Row from "./Row";
+import IdHubDashboard from "./IdHubDashboard";
 
-export default function Viewer({ virt, lines }) {
-  const { controls, lineBar, lineNums, htmlLight, colors } = useSearch();
+export default function Viewer({ virt, lines, path }) {
+  const { controls, lineBar, lineNums, htmlLight, colors, mode } = useSearch();
   const gutter = lineNums ? 72 : 0;
 
   const scrollerRef = useRef(null);
@@ -92,6 +93,7 @@ export default function Viewer({ virt, lines }) {
           className="btn btn--icon"
           onClick={lines.goTop}
           title="Top"
+          disabled={mode === "idhub"}
         >
           ⤒
         </button>
@@ -99,6 +101,7 @@ export default function Viewer({ virt, lines }) {
           className="btn btn--icon"
           onClick={lines.goMiddle}
           title="Middle"
+          disabled={mode === "idhub"}
         >
           ⇵
         </button>
@@ -106,6 +109,7 @@ export default function Viewer({ virt, lines }) {
           className="btn btn--icon"
           onClick={lines.goBottom}
           title="Bottom"
+          disabled={mode === "idhub"}
         >
           ⤓
         </button>
@@ -113,46 +117,52 @@ export default function Viewer({ virt, lines }) {
         {controls}
       </nav>
 
-      <div className={`subbar ${lineNums ? "open" : ""}`}>{lineBar}</div>
+      {mode === "standard" && (
+        <div className={`subbar ${lineNums ? "open" : ""}`}>{lineBar}</div>
+      )}
 
-      <div
-        ref={lines.boxRef}
-        style={{
-          flex: 1,
-          position: "relative",
-          "--gutter": `${gutter}px`,
-          "--row-hover": htmlLight ? colors.hover : undefined,
-          "--mark-bg": colors.mark,
-          "--hl-line-bg": colors.line,
-          background: htmlLight ? "#fff" : "transparent",
-          color: htmlLight ? "#111" : "inherit",
-          paddingBottom: 12,
-        }}
-      >
+      {mode === "idhub" ? (
+        <IdHubDashboard path={path} />
+      ) : (
         <div
-          className="gutter-border"
-          style={{ display: lineNums ? "block" : "none" }}
-        />
-        <TrackHandle
-          ref={lines.trackRef}
-          onPointerDown={lines.startDrag}
-        />
-        <Virtuoso
-          ref={virt}
-          totalCount={lines.windowCount}
-          itemContent={(index) => <Row i={index} />}
-          style={{ height: "100%", width: "100%", paddingRight: 20 }}
-          overscan={KEEP * ROW}
-          rangeChanged={lines.handleRange}
-          components={{ Scroller, List }}
-        />
-        <div
-          className="xbar"
-          ref={hbarRef}
+          ref={lines.boxRef}
+          style={{
+            flex: 1,
+            position: "relative",
+            "--gutter": `${gutter}px`,
+            "--row-hover": htmlLight ? colors.hover : undefined,
+            "--mark-bg": colors.mark,
+            "--hl-line-bg": colors.line,
+            background: htmlLight ? "#fff" : "transparent",
+            color: htmlLight ? "#111" : "inherit",
+            paddingBottom: 12,
+          }}
         >
-          <div style={{ width: xw }} />
+          <div
+            className="gutter-border"
+            style={{ display: lineNums ? "block" : "none" }}
+          />
+          <TrackHandle
+            ref={lines.trackRef}
+            onPointerDown={lines.startDrag}
+          />
+          <Virtuoso
+            ref={virt}
+            totalCount={lines.windowCount}
+            itemContent={(index) => <Row i={index} />}
+            style={{ height: "100%", width: "100%", paddingRight: 20 }}
+            overscan={KEEP * ROW}
+            rangeChanged={lines.handleRange}
+            components={{ Scroller, List }}
+          />
+          <div
+            className="xbar"
+            ref={hbarRef}
+          >
+            <div style={{ width: xw }} />
+          </div>
         </div>
-      </div>
+      )}
     </main>
   );
 }

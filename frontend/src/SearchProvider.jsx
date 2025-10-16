@@ -8,38 +8,33 @@ function parseUserTs(s) {
   if (!s) return NaN;
   const t = Date.parse(s);
   if (!Number.isNaN(t)) return t;
-  const m1 = s.match(
+  const m = s.match(
     /^(\d{4})[-/](\d{2})[-/](\d{2})[ T](\d{2}):(\d{2})(?::(\d{2}))?$/,
   );
-  if (m1) {
-    const [_, y, mo, d, h, mi, se] = m1;
-    return new Date(
-      Number(y),
-      Number(mo) - 1,
-      Number(d),
-      Number(h),
-      Number(mi),
-      Number(se || 0),
-    ).getTime();
-  }
-  return NaN;
+  if (!m) return NaN;
+  const [, y, mo, d, h, mi, se] = m;
+  return new Date(
+    Number(y),
+    Number(mo) - 1,
+    Number(d),
+    Number(h),
+    Number(mi),
+    Number(se || 0),
+  ).getTime();
 }
 function parseLineTs(line) {
-  const iso = line.match(
-    /\b(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2}):(\d{2})/,
-  );
-  if (iso) {
-    const [_, y, mo, d, h, mi, s] = iso;
-    const dt = `${y}-${mo}-${d}T${h}:${mi}:${s}Z`;
-    const t = Date.parse(dt);
+  const a = line.match(/\b(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2}):(\d{2})/);
+  if (a) {
+    const [, y, mo, d, h, mi, s] = a;
+    const t = Date.parse(`${y}-${mo}-${d}T${h}:${mi}:${s}Z`);
     if (!Number.isNaN(t)) return t;
   }
-  const slash = line.match(
+  const b = line.match(
     /\b(\d{4})\/(\d{2})\/(\d{2})[ T](\d{2}):(\d{2}):(\d{2})/,
   );
-  if (slash) {
-    const [_, y, mo, d, h, mi, s] = slash;
-    const t = new Date(
+  if (b) {
+    const [, y, mo, d, h, mi, s] = b;
+    return new Date(
       Number(y),
       Number(mo) - 1,
       Number(d),
@@ -47,7 +42,6 @@ function parseLineTs(line) {
       Number(mi),
       Number(s),
     ).getTime();
-    if (!Number.isNaN(t)) return t;
   }
   return NaN;
 }
@@ -63,7 +57,6 @@ export default function SearchProvider({
 
   const [hl, setHl] = useState(true);
   const [hlMode, setHlMode] = useState("line");
-  const [raw, setRaw] = useState(false);
   const [wrap, setWrap] = useState(!!s.wrap);
   const [lineNums, setLineNums] = useState(false);
   const htmlLight = !!s.htmlLight;
@@ -73,6 +66,8 @@ export default function SearchProvider({
     line: s.lineHighlightColor || "#cfe3ff",
     mark: s.markColor || "#7dd3fc",
   };
+
+  const [mode, setMode] = useState("standard");
 
   const [q, setQ] = useState("");
   const [regex, setRegex] = useState(false);
@@ -128,9 +123,8 @@ export default function SearchProvider({
         setMatches(Matches);
         setCur(0);
         setTotalMatches(typeof Total === "number" ? Total : Matches.length);
-        if (typeof Total !== "number" && Matches.length >= 500) {
+        if (typeof Total !== "number" && Matches.length >= 500)
           fetchTotalIfNeeded(query);
-        }
         if (Matches.length && autoJump) goLine(Matches[0]);
       })
       .catch(() => {
@@ -196,9 +190,7 @@ export default function SearchProvider({
         document.execCommand("copy");
         document.body.removeChild(ta);
       }
-    } catch (e) {
-      console.error(e);
-    }
+    } catch {}
   };
 
   const downloadRange = () => {
@@ -430,33 +422,28 @@ export default function SearchProvider({
               checked={lineNums}
               onClick={() => setLineNums((v) => !v)}
             />
-            <div style={{ height: 6 }} />
-            <div
-              style={{
-                padding: "4px 8px",
-                fontSize: 12,
-                color: "var(--text-weak)",
-              }}
-            >
-              Press Enter to run now
-            </div>
           </div>,
           document.body,
         )}
 
       <div className="divider" />
 
-      <button
-        className={`btn btn--toggle${raw ? " active" : ""}`}
-        onClick={() => setRaw(!raw)}
-        title={
-          raw
-            ? "Showing Raw (escape HTML). Click to render HTML."
-            : "Showing Rendered (HTML allowed). Click for Raw."
-        }
+      <label
+        className="label"
+        style={{ marginLeft: 6, marginRight: 6 }}
       >
-        Raw
-      </button>
+        Mode
+      </label>
+      <select
+        className="field"
+        value={mode}
+        onChange={(e) => setMode(e.target.value)}
+        title="View mode"
+        style={{ width: 140 }}
+      >
+        <option value="standard">Standard</option>
+        <option value="idhub">IDHub</option>
+      </select>
     </>
   );
 
@@ -496,7 +483,6 @@ export default function SearchProvider({
             if (e.key === "Enter") goToTimestamp(tsInput);
           }}
           style={{ width: 220 }}
-          title="Jump to nearest timestamp"
         />
         <button
           className="btn"
@@ -551,7 +537,7 @@ export default function SearchProvider({
         getLine,
         hl,
         hlMode,
-        raw,
+        raw: false,
         wrap,
         lineNums,
         matches,
@@ -563,6 +549,7 @@ export default function SearchProvider({
         colors,
         controls,
         lineBar,
+        mode,
       }}
     >
       {children}
