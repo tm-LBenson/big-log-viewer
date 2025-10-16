@@ -6,7 +6,7 @@ export const defaultSettings = {
   theme: "dark",
   wrap: false,
   lastFile: "",
-  htmlLight: false,
+  htmlLight: true,
   hoverColorLight: "#eef2f7",
   lineHighlightColor: "#cfe3ff",
   markColor: "#7dd3fc",

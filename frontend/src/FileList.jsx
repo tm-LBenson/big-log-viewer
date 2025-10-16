@@ -115,7 +115,7 @@ function Folder({
         files.map((f) => (
           <Row
             key={f.p}
-            icon="📄"
+            icon=""
             label={f.n}
             depth={d + 1}
             sel={sel === f.p}
