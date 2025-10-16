@@ -4,13 +4,17 @@ import (
 	"bytes"
 	"embed"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"io/fs"
 	"log"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"sync"
@@ -64,6 +68,8 @@ func main() {
 	http.HandleFunc("/api/root/set", setRoot)
 	http.HandleFunc("/api/range", rangeLines)
 	http.HandleFunc("/api/extensions", extensionsHandler)
+	http.HandleFunc("/api/idhub/jobs", idhubJobs)
+	http.HandleFunc("/api/idhub/log", idhubLog)
 
 	fmt.Println("serving http://" + *addr)
 	srv := &http.Server{
@@ -465,4 +471,149 @@ func isTextBySniff(p string) bool {
 		return false
 	}
 	return true
+}
+
+func getAuth(r *http.Request) (string, error) {
+	auth := r.Header.Get("Authorization")
+	if auth == "" {
+		if t := strings.TrimSpace(r.URL.Query().Get("token")); t != "" {
+			if strings.HasPrefix(strings.ToLower(t), "bearer ") {
+				auth = t
+			} else {
+				auth = "Bearer " + t
+			}
+		}
+	}
+	if auth == "" {
+		return "", errors.New("missing bearer token")
+	}
+	return auth, nil
+}
+
+func idhubJobs(w http.ResponseWriter, r *http.Request) {
+	base := strings.TrimRight(r.URL.Query().Get("base"), "/")
+	tenant := strings.TrimSpace(r.URL.Query().Get("tenant"))
+	source := strings.TrimSpace(r.URL.Query().Get("sourceId"))
+	page := strings.TrimSpace(r.URL.Query().Get("page"))
+	if page == "" {
+		page = "0"
+	}
+	size := strings.TrimSpace(r.URL.Query().Get("size"))
+	if size == "" {
+		size = "20"
+	}
+
+	if base == "" || tenant == "" || source == "" {
+		http.Error(w, "base, tenant, and sourceId are required", http.StatusBadRequest)
+		return
+	}
+	auth, err := getAuth(r)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusUnauthorized)
+		return
+	}
+
+	u := fmt.Sprintf("%s/v1/tenants/%s/jobs?sourceId=%s&page[size]=%s&page[number]=%s",
+		base,
+		url.PathEscape(tenant),
+		url.QueryEscape(source),
+		url.QueryEscape(size),
+		url.QueryEscape(page),
+	)
+
+	req, _ := http.NewRequest(http.MethodGet, u, nil)
+	req.Header.Set("Authorization", auth)
+
+	client := &http.Client{Timeout: 30 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		http.Error(w, "upstream error", http.StatusBadGateway)
+		return
+	}
+	defer resp.Body.Close()
+
+	w.Header().Set("Content-Type", resp.Header.Get("Content-Type"))
+	w.WriteHeader(resp.StatusCode)
+	io.Copy(w, resp.Body)
+}
+
+var safeRe = regexp.MustCompile(`[^a-zA-Z0-9._-]+`)
+
+func sanitize(s string) string {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return "x"
+	}
+	return safeRe.ReplaceAllString(s, "_")
+}
+
+func idhubLog(w http.ResponseWriter, r *http.Request) {
+	base := strings.TrimRight(r.URL.Query().Get("base"), "/")
+	tenant := strings.TrimSpace(r.URL.Query().Get("tenant"))
+	jobID := strings.TrimSpace(r.URL.Query().Get("job"))
+	if base == "" || tenant == "" || jobID == "" {
+		http.Error(w, "base, tenant, and job are required", http.StatusBadRequest)
+		return
+	}
+	size := strings.TrimSpace(r.URL.Query().Get("size"))
+	if size == "" {
+		size = "5000000"
+	}
+	page := strings.TrimSpace(r.URL.Query().Get("page"))
+	if page == "" {
+		page = "0"
+	}
+
+	auth, err := getAuth(r)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusUnauthorized)
+		return
+	}
+
+	u := fmt.Sprintf("%s/v1/tenants/%s/jobs/%s/logs?page[size]=%s&page[number]=%s",
+		base,
+		url.PathEscape(tenant),
+		url.PathEscape(jobID),
+		url.QueryEscape(size),
+		url.QueryEscape(page),
+	)
+
+	req, _ := http.NewRequest(http.MethodGet, u, nil)
+	req.Header.Set("Authorization", auth)
+
+	client := &http.Client{Timeout: 60 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		http.Error(w, "upstream error", http.StatusBadGateway)
+		return
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		w.Header().Set("Content-Type", resp.Header.Get("Content-Type"))
+		w.WriteHeader(resp.StatusCode)
+		io.Copy(w, resp.Body)
+		return
+	}
+
+	relDir := filepath.Join("idhub", sanitize(tenant), "jobs")
+	absDir := filepath.Join(rootDir, relDir)
+	_ = os.MkdirAll(absDir, 0o755)
+	fileName := sanitize(jobID) + ".log"
+	absPath := filepath.Join(absDir, fileName)
+	f, err := os.Create(absPath)
+	if err != nil {
+		http.Error(w, "failed to create log file", http.StatusInternalServerError)
+		return
+	}
+	defer f.Close()
+
+	if _, err := io.Copy(f, resp.Body); err != nil {
+		http.Error(w, "failed to write log file", http.StatusInternalServerError)
+		return
+	}
+
+	writeJSON(w, map[string]any{
+		"path": filepath.ToSlash(filepath.Join(relDir, fileName)),
+	})
 }

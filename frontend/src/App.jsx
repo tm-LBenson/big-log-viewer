@@ -3,12 +3,14 @@ import FileList from "./FileList";
 import LogViewer from "./LogViewer";
 import Settings from "./Settings";
 import useSettings, { applyBackend } from "./useSettings";
+import IDHub from "./IdHub";
 import "./App.css";
 
 export default function App() {
   const [file, setFile] = useState(null);
   const [width, setWidth] = useState(260);
   const [openSettings, setOpenSettings] = useState(false);
+  const [tab, setTab] = useState("files");
   const fileListRef = useRef(null);
   const drag = useRef(false);
   const store = useSettings();
@@ -25,13 +27,11 @@ export default function App() {
     const w = Math.min(600, Math.max(180, e.clientX));
     setWidth(w);
   }, []);
-
   const stopDrag = useCallback(() => {
     drag.current = false;
     window.removeEventListener("mousemove", onMouseMove);
     window.removeEventListener("mouseup", stopDrag);
   }, [onMouseMove]);
-
   const startDrag = (e) => {
     e.preventDefault();
     drag.current = true;
@@ -52,6 +52,20 @@ export default function App() {
           Big Log
         </div>
         <div className="spacer" />
+        <div className="divider" />
+        <button
+          className={`btn btn--toggle ${tab === "files" ? "active" : ""}`}
+          onClick={() => setTab("files")}
+        >
+          Big Log
+        </button>
+        <button
+          className={`btn btn--toggle ${tab === "idhub" ? "active" : ""}`}
+          onClick={() => setTab("idhub")}
+        >
+          IDHub
+        </button>
+        <div className="spacer" />
         <button
           className="btn"
           onClick={() => setOpenSettings(true)}
@@ -60,25 +74,37 @@ export default function App() {
         </button>
       </header>
 
-      <div
-        className="app"
-        style={{ gridTemplateColumns: `${width}px 6px 1fr` }}
-      >
-        <FileList
-          ref={fileListRef}
-          sel={file}
-          onSel={onSelectFile}
-          onLoaded={(paths) => {
-            const last = store.get().lastFile;
-            if (last && !paths.includes(last)) setFile(null);
-          }}
-        />
+      {tab === "files" ? (
         <div
-          className="resizer"
-          onMouseDown={startDrag}
-        />
-        <LogViewer path={file} />
-      </div>
+          className="app"
+          style={{ gridTemplateColumns: `${width}px 6px 1fr` }}
+        >
+          <FileList
+            ref={fileListRef}
+            sel={file}
+            onSel={onSelectFile}
+            onLoaded={(paths) => {
+              const last = store.get().lastFile;
+              if (last && !paths.includes(last)) setFile(null);
+            }}
+          />
+          <div
+            className="resizer"
+            onMouseDown={startDrag}
+          />
+          <LogViewer path={file} />
+        </div>
+      ) : (
+        <div style={{ height: "calc(100% - 56px)" }}>
+          <IDHub
+            onOpenLog={(path) => {
+              setFile(path);
+              store.set({ lastFile: path });
+              setTab("files");
+            }}
+          />
+        </div>
+      )}
 
       <Settings
         open={openSettings}
