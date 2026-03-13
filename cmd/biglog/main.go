@@ -68,6 +68,10 @@ func main() {
 	http.HandleFunc("/api/root/set", setRoot)
 	http.HandleFunc("/api/range", rangeLines)
 	http.HandleFunc("/api/extensions", extensionsHandler)
+	http.HandleFunc("/api/idhub/connect/start", idhubConnectStart)
+	http.HandleFunc("/api/idhub/connect/status", idhubConnectStatus)
+	http.HandleFunc("/api/idhub/connect/disconnect", idhubConnectDisconnect)
+	http.HandleFunc("/api/idhub/sources", idhubSources)
 	http.HandleFunc("/api/idhub/jobs", idhubJobs)
 	http.HandleFunc("/api/idhub/log", idhubLog)
 
@@ -491,8 +495,11 @@ func getAuth(r *http.Request) (string, error) {
 }
 
 func idhubJobs(w http.ResponseWriter, r *http.Request) {
-	base := strings.TrimRight(r.URL.Query().Get("base"), "/")
-	tenant := strings.TrimSpace(r.URL.Query().Get("tenant"))
+	proxy, err := resolveIDHubProxyContext(r)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
 	source := strings.TrimSpace(r.URL.Query().Get("sourceId"))
 	page := strings.TrimSpace(r.URL.Query().Get("page"))
 	if page == "" {
@@ -502,27 +509,22 @@ func idhubJobs(w http.ResponseWriter, r *http.Request) {
 	if size == "" {
 		size = "20"
 	}
-
-	if base == "" || tenant == "" || source == "" {
-		http.Error(w, "base, tenant, and sourceId are required", http.StatusBadRequest)
-		return
-	}
-	auth, err := getAuth(r)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusUnauthorized)
+	if source == "" {
+		http.Error(w, "sourceId is required", http.StatusBadRequest)
 		return
 	}
 
 	u := fmt.Sprintf("%s/v1/tenants/%s/jobs?sourceId=%s&page[size]=%s&page[number]=%s",
-		base,
-		url.PathEscape(tenant),
+		proxy.Base,
+		url.PathEscape(proxy.Tenant),
 		url.QueryEscape(source),
 		url.QueryEscape(size),
 		url.QueryEscape(page),
 	)
 
 	req, _ := http.NewRequest(http.MethodGet, u, nil)
-	req.Header.Set("Authorization", auth)
+	req.Header.Set("Authorization", proxy.Auth)
+	req.Header.Set("Accept", "application/json,text/plain")
 
 	client := &http.Client{Timeout: 30 * time.Second}
 	resp, err := client.Do(req)
@@ -534,7 +536,7 @@ func idhubJobs(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", resp.Header.Get("Content-Type"))
 	w.WriteHeader(resp.StatusCode)
-	io.Copy(w, resp.Body)
+	_, _ = io.Copy(w, resp.Body)
 }
 
 var safeRe = regexp.MustCompile(`[^a-zA-Z0-9._-]+`)
@@ -548,11 +550,14 @@ func sanitize(s string) string {
 }
 
 func idhubLog(w http.ResponseWriter, r *http.Request) {
-	base := strings.TrimRight(r.URL.Query().Get("base"), "/")
-	tenant := strings.TrimSpace(r.URL.Query().Get("tenant"))
+	proxy, err := resolveIDHubProxyContext(r)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
 	jobID := strings.TrimSpace(r.URL.Query().Get("job"))
-	if base == "" || tenant == "" || jobID == "" {
-		http.Error(w, "base, tenant, and job are required", http.StatusBadRequest)
+	if jobID == "" {
+		http.Error(w, "job is required", http.StatusBadRequest)
 		return
 	}
 	size := strings.TrimSpace(r.URL.Query().Get("size"))
@@ -564,22 +569,17 @@ func idhubLog(w http.ResponseWriter, r *http.Request) {
 		page = "0"
 	}
 
-	auth, err := getAuth(r)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusUnauthorized)
-		return
-	}
-
 	u := fmt.Sprintf("%s/v1/tenants/%s/jobs/%s/logs?page[size]=%s&page[number]=%s",
-		base,
-		url.PathEscape(tenant),
+		proxy.Base,
+		url.PathEscape(proxy.Tenant),
 		url.PathEscape(jobID),
 		url.QueryEscape(size),
 		url.QueryEscape(page),
 	)
 
 	req, _ := http.NewRequest(http.MethodGet, u, nil)
-	req.Header.Set("Authorization", auth)
+	req.Header.Set("Authorization", proxy.Auth)
+	req.Header.Set("Accept", "text/plain,application/json,text/plain")
 
 	client := &http.Client{Timeout: 60 * time.Second}
 	resp, err := client.Do(req)
@@ -592,11 +592,11 @@ func idhubLog(w http.ResponseWriter, r *http.Request) {
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		w.Header().Set("Content-Type", resp.Header.Get("Content-Type"))
 		w.WriteHeader(resp.StatusCode)
-		io.Copy(w, resp.Body)
+		_, _ = io.Copy(w, resp.Body)
 		return
 	}
 
-	relDir := filepath.Join("idhub", sanitize(tenant), "jobs")
+	relDir := filepath.Join("idhub", sanitize(proxy.Tenant), "jobs")
 	absDir := filepath.Join(rootDir, relDir)
 	_ = os.MkdirAll(absDir, 0o755)
 	fileName := sanitize(jobID) + ".log"

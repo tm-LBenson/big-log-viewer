@@ -1,3 +1,3 @@
 module github.com/tm-LBenson/big-log-viewer
 
-go 1.24.1
+go 1.23.2

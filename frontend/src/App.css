@@ -358,3 +358,101 @@ body.modal-open .menu {
   display: inline-block;
   margin: 0;
 }
+
+.idhub-page {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+}
+
+.idhub-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  padding: 16px;
+  border-bottom: 1px solid var(--border);
+  background: var(--surface);
+}
+
+.idhub-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  gap: 12px;
+  align-items: end;
+}
+
+.idhub-field-wrap {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+}
+
+.idhub-field-label {
+  font-size: 12px;
+  color: var(--text-weak);
+}
+
+.idhub-status-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.idhub-status-pill {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 28px;
+  padding: 0 10px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.idhub-help-text {
+  font-size: 12px;
+  color: var(--text-weak);
+}
+
+.idhub-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.idhub-checkbox {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--text);
+  font-size: 14px;
+}
+
+.idhub-meta-box {
+  min-height: 32px;
+  padding: 8px 10px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: var(--panel);
+  color: var(--text-weak);
+  font-size: 13px;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 4px;
+}
+
+.idhub-banner {
+  padding: 12px 16px;
+  border-bottom: 1px solid rgba(239, 68, 68, 0.22);
+  background: rgba(239, 68, 68, 0.16);
+  color: #fecaca;
+}
+
+[data-theme="light"] .idhub-banner {
+  color: #991b1b;
+}
