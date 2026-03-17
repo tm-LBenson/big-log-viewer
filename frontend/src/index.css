@@ -41,12 +41,23 @@ body {
 }
 
 body {
+<<<<<<< HEAD
+  overflow: hidden;
+=======
+>>>>>>> 237adf36c499f648c8cd17e090791a39b474c67a
   background: var(--bg);
   color: var(--text);
 }
 
 .virt-scroller {
+<<<<<<< HEAD
+  width: 100%;
+  height: 100%;
   overflow: auto;
+  overscroll-behavior: contain;
+=======
+  overflow: auto;
+>>>>>>> 237adf36c499f648c8cd17e090791a39b474c67a
   scrollbar-width: none;
   -ms-overflow-style: none;
 }

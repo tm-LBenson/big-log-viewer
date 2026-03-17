@@ -1,5 +1,5 @@
 import { forwardRef } from "react";
-import { HANDLE, TRACK_H } from "./constants";
+import { HANDLE } from "./constants";
 
 export default forwardRef(function TrackHandle({ onPointerDown }, ref) {
   return (
@@ -7,11 +7,10 @@ export default forwardRef(function TrackHandle({ onPointerDown }, ref) {
       ref={ref}
       style={{
         position: "absolute",
-        top: "50%",
-        transform: "translateY(-50%)",
+        top: 0,
         right: 0,
+        bottom: 12,
         width: 20,
-        height: TRACK_H,
         userSelect: "none",
         zIndex: 10,
         pointerEvents: "none",
@@ -28,6 +27,10 @@ export default forwardRef(function TrackHandle({ onPointerDown }, ref) {
           background: "#888",
           borderRadius: 6,
           pointerEvents: "auto",
+<<<<<<< HEAD
+          cursor: "grab",
+=======
+>>>>>>> 237adf36c499f648c8cd17e090791a39b474c67a
         }}
       />
     </div>

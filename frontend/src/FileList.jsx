@@ -10,6 +10,9 @@ import {
 import { createPortal } from "react-dom";
 import "./App.css";
 
+const NAME_COMPARE = (a, b) =>
+  a.localeCompare(b, undefined, { numeric: true, sensitivity: "base" });
+
 const build = (list) => {
   const root = { d: {}, f: [] };
   list.forEach((rel) => {
@@ -24,8 +27,12 @@ const build = (list) => {
 };
 
 const sortFiles = (files, mode, mtime) => {
+<<<<<<< HEAD
+  const byNameAsc = (a, b) => NAME_COMPARE(a.n, b.n);
+=======
   const byNameAsc = (a, b) =>
     a.n.localeCompare(b.n, undefined, { numeric: true, sensitivity: "base" });
+>>>>>>> 237adf36c499f648c8cd17e090791a39b474c67a
   const byNameDesc = (a, b) => -byNameAsc(a, b);
   const byMtimeDesc = (a, b) => {
     const ma = mtime.get(a.p),
@@ -62,6 +69,122 @@ const sortFiles = (files, mode, mtime) => {
   return arr;
 };
 
+<<<<<<< HEAD
+const sortFolderEntries = (entries, mode) => {
+  const dirSort = mode === "name-desc"
+    ? (a, b) => -NAME_COMPARE(a[0], b[0])
+    : (a, b) => NAME_COMPARE(a[0], b[0]);
+  return entries.slice().sort(dirSort);
+};
+
+function FolderGlyph({ open }) {
+  return (
+    <svg
+      viewBox="0 0 20 16"
+      fill="none"
+      aria-hidden="true"
+    >
+      <path
+        d="M2.5 5.25c0-.97.78-1.75 1.75-1.75h3.1c.48 0 .95.2 1.27.56L9.7 5.2h5.05c.97 0 1.75.78 1.75 1.75v5.8c0 .97-.78 1.75-1.75 1.75H4.25c-.97 0-1.75-.78-1.75-1.75v-7.5Z"
+        fill="currentColor"
+        opacity={open ? "0.26" : "0.14"}
+      />
+      <path
+        d="M2.5 5.25c0-.97.78-1.75 1.75-1.75h3.1c.48 0 .95.2 1.27.56L9.7 5.2h5.05c.97 0 1.75.78 1.75 1.75v5.8c0 .97-.78 1.75-1.75 1.75H4.25c-.97 0-1.75-.78-1.75-1.75v-7.5Z"
+        stroke="currentColor"
+        strokeWidth="1.25"
+        strokeLinejoin="round"
+      />
+    </svg>
+  );
+}
+
+function FileGlyph() {
+  return (
+    <svg
+      viewBox="0 0 16 18"
+      fill="none"
+      aria-hidden="true"
+    >
+      <path
+        d="M4 1.75h5l3.25 3.25v9.25c0 .97-.78 1.75-1.75 1.75h-6.5c-.97 0-1.75-.78-1.75-1.75V3.5C2.25 2.53 3.03 1.75 4 1.75Z"
+        fill="currentColor"
+        opacity="0.12"
+      />
+      <path
+        d="M9 1.75v2.5c0 .55.45 1 1 1h2.25"
+        stroke="currentColor"
+        strokeWidth="1.2"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+      <path
+        d="M4 1.75h5l3.25 3.25v9.25c0 .97-.78 1.75-1.75 1.75h-6.5c-.97 0-1.75-.78-1.75-1.75V3.5C2.25 2.53 3.03 1.75 4 1.75Z"
+        stroke="currentColor"
+        strokeWidth="1.2"
+        strokeLinejoin="round"
+      />
+    </svg>
+  );
+}
+
+function TreeRow({
+  label,
+  depth,
+  selected,
+  kind,
+  open,
+  onClick,
+}) {
+  return (
+    <button
+      type="button"
+      className={`tree-row tree-row--${kind}${selected ? " selected" : ""}`}
+      style={{ paddingLeft: depth * 16 + 10 }}
+      onClick={onClick}
+      title={label}
+    >
+      <span
+        className={`tree-row__twisty${kind === "folder" ? "" : " tree-row__twisty--spacer"}`}
+        aria-hidden="true"
+      >
+        {kind === "folder" ? (open ? "▾" : "▸") : "•"}
+      </span>
+      <span className="tree-row__icon" aria-hidden="true">
+        {kind === "folder" ? <FolderGlyph open={open} /> : <FileGlyph />}
+      </span>
+      <span className="tree-row__label">{label}</span>
+    </button>
+  );
+}
+
+function Folder({
+  n,
+  node,
+  d,
+  open,
+  setOpen,
+  sel,
+  onSel,
+  labelOverride,
+  sortMode,
+  mtime,
+  pathKey = "",
+}) {
+  const key = pathKey || "__root__";
+  const opened = open[key] ?? true;
+  const toggle = () => setOpen((prev) => ({ ...prev, [key]: !opened }));
+  const label = d === 0 ? labelOverride : n;
+  const files = useMemo(
+    () => sortFiles(node.f || [], sortMode, mtime),
+    [node.f, sortMode, mtime],
+  );
+  const folders = useMemo(
+    () => sortFolderEntries(Object.entries(node.d || {}), sortMode),
+    [node.d, sortMode],
+  );
+
+=======
 const Row = ({ icon, label, depth, sel, onClick }) => (
   <div
     className={`row${sel ? " selected" : ""}`}
@@ -102,26 +225,57 @@ function Folder({
     [node.f, sortMode, mtime],
   );
 
+>>>>>>> 237adf36c499f648c8cd17e090791a39b474c67a
   return (
     <>
-      <Row
-        icon={opened ? "▾" : "▸"}
-        label={lbl}
+      <TreeRow
+        kind="folder"
+        label={label}
         depth={d}
-        sel={false}
+        selected={false}
+        open={opened}
         onClick={toggle}
       />
       {opened &&
+<<<<<<< HEAD
+        folders.map(([k, v]) => {
+          const childPath = pathKey ? `${pathKey}/${k}` : k;
+          return (
+            <Folder
+              key={childPath}
+              n={k}
+              node={v}
+              d={d + 1}
+              open={open}
+              setOpen={setOpen}
+              sel={sel}
+              onSel={onSel}
+              labelOverride={labelOverride}
+              sortMode={sortMode}
+              mtime={mtime}
+              pathKey={childPath}
+            />
+          );
+        })}
+      {opened &&
+        files.map((f) => (
+          <TreeRow
+            key={f.p}
+            kind="file"
+=======
         files.map((f) => (
           <Row
             key={f.p}
             icon=""
+>>>>>>> 237adf36c499f648c8cd17e090791a39b474c67a
             label={f.n}
             depth={d + 1}
-            sel={sel === f.p}
+            selected={sel === f.p}
             onClick={() => onSel(f.p)}
           />
         ))}
+<<<<<<< HEAD
+=======
       {opened &&
         Object.entries(node.d).map(([k, v]) => (
           <Folder
@@ -138,6 +292,7 @@ function Folder({
             mtime={mtime}
           />
         ))}
+>>>>>>> 237adf36c499f648c8cd17e090791a39b474c67a
     </>
   );
 }
@@ -249,6 +404,59 @@ export default forwardRef(function FileList({ sel, onSel, onLoaded }, ref) {
 
   return (
     <>
+<<<<<<< HEAD
+      <aside className="sidebar sidebar--explorer">
+        <div className="sidebar-head">
+          <div className="sidebar-head__eyebrow">Explorer</div>
+          <div className="sidebar-head__title-row">
+            <div className="sidebar-head__title">Log files</div>
+            <div className="sidebar-head__meta">{paths.length.toLocaleString()}</div>
+          </div>
+        </div>
+
+        <div className="toolbar sidebar-toolbar">
+          <button
+            className="btn btn--primary"
+            onClick={() => fetchList()}
+          >
+            Refresh
+          </button>
+          <div
+            style={{ position: "relative" }}
+            ref={sortBtnRef}
+          >
+            <button
+              className="btn"
+              onClick={() => setSortOpen((v) => !v)}
+            >
+              Sort…
+            </button>
+          </div>
+        </div>
+
+        <div className="sidebar-tree">
+          {loading ? (
+            <div className="sidebar-spinner-wrap">
+              <div className="sidebar-spinner" />
+            </div>
+          ) : paths.length ? (
+            <Folder
+              n=""
+              node={tree}
+              d={0}
+              open={open}
+              setOpen={setOpen}
+              sel={sel}
+              onSel={onSel}
+              labelOverride={rootLabel}
+              sortMode={sortMode}
+              mtime={mtimeMap}
+            />
+          ) : (
+            <div className="sidebar-empty">No files found in the current log root.</div>
+          )}
+        </div>
+=======
       <aside className="sidebar">
         <div className="toolbar">
           <button
@@ -298,6 +506,7 @@ export default forwardRef(function FileList({ sel, onSel, onLoaded }, ref) {
             mtime={mtimeMap}
           />
         )}
+>>>>>>> 237adf36c499f648c8cd17e090791a39b474c67a
       </aside>
 
       {sortOpen &&

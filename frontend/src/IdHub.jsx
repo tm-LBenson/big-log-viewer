@@ -21,6 +21,23 @@ function sourceName(source) {
   return source?.attributes?.name || source?.id || "Unnamed source";
 }
 
+<<<<<<< HEAD
+function tenantHost(value) {
+  if (!value) return "";
+  try {
+    return new URL(value).host;
+  } catch {
+    const compact = value.replace(/^https?:\/\//i, "");
+    return compact.split("/")[0] || compact;
+  }
+}
+
+function pluralize(count, label) {
+  return `${count} ${label}${count === 1 ? "" : "s"}`;
+}
+
+=======
+>>>>>>> 237adf36c499f648c8cd17e090791a39b474c67a
 async function parseResponse(response, fallbackMessage) {
   const text = await response.text();
   let data = null;
@@ -74,19 +91,44 @@ function statusTone(state, connected) {
   };
 }
 
+<<<<<<< HEAD
+function statusText({ connected, sessionState, statusMessage, sourcesCount }) {
+  if (connected) {
+    return sourcesCount
+      ? `${pluralize(sourcesCount, "source")} ready.`
+      : "Connected to IDHub.";
+  }
+  if (CONNECTING_STATES.has(sessionState)) {
+    return "Finish sign-in in the browser window.";
+  }
+  if (sessionState === "error") {
+    return "Could not connect to IDHub.";
+  }
+  return statusMessage || "Enter a tenant URL to connect.";
+}
+
+=======
+>>>>>>> 237adf36c499f648c8cd17e090791a39b474c67a
 export default function IdHub({ onOpenLog }) {
   const initial = useMemo(() => loadIdHub(), []);
   const initialKey = makeKey(initial.tenantUrl, initial.sourceId);
   const initialCache = readCache(initial, initialKey);
 
+<<<<<<< HEAD
+=======
   const [remember, setRemember] = useState(!!initial.remember);
+>>>>>>> 237adf36c499f648c8cd17e090791a39b474c67a
   const [tenantUrl, setTenantUrl] = useState(initial.tenantUrl || "");
   const [sessionId, setSessionId] = useState(initial.sessionId || "");
   const [sessionState, setSessionState] = useState(initial.sessionId ? "launching" : "idle");
   const [statusMessage, setStatusMessage] = useState(
     initial.sessionId
       ? "Reconnecting to your current IDHub session…"
+<<<<<<< HEAD
+      : "Enter a tenant URL to connect.",
+=======
       : "Paste a RapidIdentity or IDHub tenant URL to connect.",
+>>>>>>> 237adf36c499f648c8cd17e090791a39b474c67a
   );
   const [errorMessage, setErrorMessage] = useState("");
   const [connectionInfo, setConnectionInfo] = useState(null);
@@ -97,12 +139,35 @@ export default function IdHub({ onOpenLog }) {
   const [end, setEnd] = useState(!!initialCache.end);
   const [loadingJobs, setLoadingJobs] = useState(false);
   const [connecting, setConnecting] = useState(false);
+<<<<<<< HEAD
+=======
   const [refreshingSources, setRefreshingSources] = useState(false);
+>>>>>>> 237adf36c499f648c8cd17e090791a39b474c67a
 
   const bucket = useMemo(() => makeKey(tenantUrl, sourceId), [tenantUrl, sourceId]);
   const connected = Boolean(connectionInfo?.connected) || sessionState === "connected";
   const canLoadJobs = Boolean(sessionId && sourceId && connected);
   const tone = statusTone(sessionState, connected);
+<<<<<<< HEAD
+  const selectedSource = useMemo(
+    () => sources.find((item) => item.id === sourceId) || null,
+    [sourceId, sources],
+  );
+  const sourceLabels = useMemo(
+    () => new Map(sources.map((item) => [item.id, sourceName(item)])),
+    [sources],
+  );
+  const currentTenantHost = useMemo(() => tenantHost(tenantUrl), [tenantUrl]);
+  const compactStatus = statusText({
+    connected,
+    sessionState,
+    statusMessage,
+    sourcesCount: sources.length,
+  });
+  const showBrowserHint = CONNECTING_STATES.has(sessionState);
+  const tenantLocked = connected || showBrowserHint;
+=======
+>>>>>>> 237adf36c499f648c8cd17e090791a39b474c67a
 
   useEffect(() => {
     const cached = readCache(loadIdHub(), bucket);
@@ -118,13 +183,20 @@ export default function IdHub({ onOpenLog }) {
       [bucket]: { jobs, page, end },
     };
     saveIdHub({
+<<<<<<< HEAD
+=======
       remember,
+>>>>>>> 237adf36c499f648c8cd17e090791a39b474c67a
       tenantUrl,
       sessionId,
       sourceId,
       caches,
     });
+<<<<<<< HEAD
+  }, [tenantUrl, sessionId, sourceId, bucket, jobs, page, end]);
+=======
   }, [remember, tenantUrl, sessionId, sourceId, bucket, jobs, page, end]);
+>>>>>>> 237adf36c499f648c8cd17e090791a39b474c67a
 
   const applyStatus = useCallback(
     (data) => {
@@ -134,10 +206,14 @@ export default function IdHub({ onOpenLog }) {
       setConnectionInfo(data || null);
       setSessionState(nextState);
       setStatusMessage(
+<<<<<<< HEAD
+        data?.message || (data?.connected ? "Connected to IDHub." : "Enter a tenant URL to connect."),
+=======
         data?.message ||
           (data?.connected
             ? "Connected to IDHub."
             : "Paste a RapidIdentity or IDHub tenant URL to connect."),
+>>>>>>> 237adf36c499f648c8cd17e090791a39b474c67a
       );
       setErrorMessage(data?.lastError || "");
       setSources(nextSources);
@@ -213,7 +289,11 @@ export default function IdHub({ onOpenLog }) {
     setConnecting(true);
     setErrorMessage("");
     setSessionState("launching");
+<<<<<<< HEAD
+    setStatusMessage("Opening a browser window for sign-in…");
+=======
     setStatusMessage("Opening a browser window for RI / IDHub sign-in…");
+>>>>>>> 237adf36c499f648c8cd17e090791a39b474c67a
     clearJobs();
     try {
       const response = await fetch("/api/idhub/connect/start", {
@@ -252,6 +332,8 @@ export default function IdHub({ onOpenLog }) {
     }
   };
 
+<<<<<<< HEAD
+=======
   const refreshSources = async () => {
     if (!sessionId) return;
     setRefreshingSources(true);
@@ -279,6 +361,7 @@ export default function IdHub({ onOpenLog }) {
     }
   };
 
+>>>>>>> 237adf36c499f648c8cd17e090791a39b474c67a
   const loadNext = async (reset) => {
     if (!canLoadJobs || loadingJobs || (end && !reset)) return;
     setLoadingJobs(true);
@@ -369,6 +452,38 @@ export default function IdHub({ onOpenLog }) {
           >
             {tone.label}
           </span>
+<<<<<<< HEAD
+          <span style={{ color: "var(--text-weak)" }}>{compactStatus}</span>
+        </div>
+
+        {(currentTenantHost || selectedSource || (connected && sources.length)) && (
+          <div className="idhub-summary-row">
+            {currentTenantHost && (
+              <span className="idhub-summary-pill" title={tenantUrl}>
+                {currentTenantHost}
+              </span>
+            )}
+            {connected && sources.length > 0 && (
+              <span className="idhub-summary-pill">{pluralize(sources.length, "source")}</span>
+            )}
+            {selectedSource && (
+              <span className="idhub-summary-pill" title={sourceId}>
+                {sourceName(selectedSource)}
+              </span>
+            )}
+          </div>
+        )}
+
+        <div className="idhub-grid">
+          <label className="idhub-field-wrap">
+            <span className="idhub-field-label">Customer tenant URL</span>
+            <input
+              className="field"
+              placeholder="https://customer.us004-rapididentity.com"
+              value={tenantUrl}
+              onChange={(event) => setTenantUrl(event.target.value.trim())}
+              disabled={tenantLocked}
+=======
           <span style={{ color: "var(--text-weak)" }}>{statusMessage}</span>
         </div>
 
@@ -383,11 +498,16 @@ export default function IdHub({ onOpenLog }) {
               placeholder="https://customer.us004-rapididentity.com or https://customer-idhub.us004-rapididentity.com/idhub"
               value={tenantUrl}
               onChange={(event) => setTenantUrl(event.target.value.trim())}
+>>>>>>> 237adf36c499f648c8cd17e090791a39b474c67a
             />
           </label>
 
           <label className="idhub-field-wrap">
+<<<<<<< HEAD
+            <span className="idhub-field-label">Source</span>
+=======
             <span className="idhub-field-label">IDHub source</span>
+>>>>>>> 237adf36c499f648c8cd17e090791a39b474c67a
             <select
               className="field"
               value={sourceId}
@@ -411,6 +531,15 @@ export default function IdHub({ onOpenLog }) {
               ))}
             </select>
           </label>
+<<<<<<< HEAD
+        </div>
+
+        {showBrowserHint && (
+          <div className="idhub-inline-note">
+            Finish sign-in in the browser window. If the RI portal opens, click IDHub.
+          </div>
+        )}
+=======
 
           <div className="idhub-field-wrap">
             <span className="idhub-field-label">Connection details</span>
@@ -431,10 +560,53 @@ export default function IdHub({ onOpenLog }) {
           Support-mode flow: a separate browser window opens for RI / Okta sign-in.
           If you land in the RapidIdentity portal after login, click the IDHub tile once.
         </div>
+>>>>>>> 237adf36c499f648c8cd17e090791a39b474c67a
 
         <div className="idhub-actions">
           <button
             className="btn btn--primary"
+<<<<<<< HEAD
+            onClick={connected ? () => loadNext(true) : startConnect}
+            disabled={connected ? !canLoadJobs || loadingJobs : !tenantUrl.trim() || connecting}
+          >
+            {connected
+              ? loadingJobs
+                ? "Loading…"
+                : jobs.length
+                  ? "Reload jobs"
+                  : "Load jobs"
+              : connecting
+                ? "Opening browser…"
+                : "Connect"}
+          </button>
+
+          {connected && (
+            <>
+              <button
+                className="btn"
+                onClick={startConnect}
+                disabled={connecting}
+              >
+                Reconnect
+              </button>
+              {jobs.length > 0 && (
+                <button
+                  className="btn"
+                  onClick={clearJobs}
+                >
+                  Clear jobs
+                </button>
+              )}
+              <button
+                className="btn"
+                onClick={disconnectSession}
+                disabled={!sessionId}
+              >
+                Disconnect
+              </button>
+            </>
+          )}
+=======
             onClick={startConnect}
             disabled={!tenantUrl.trim() || connecting}
           >
@@ -476,6 +648,7 @@ export default function IdHub({ onOpenLog }) {
             />
             Remember tenant + source
           </label>
+>>>>>>> 237adf36c499f648c8cd17e090791a39b474c67a
         </div>
       </div>
 
@@ -508,6 +681,11 @@ export default function IdHub({ onOpenLog }) {
               const ingested = attributes?.statistics?.content?.sourceStats?.ingested;
               const consolidated =
                 attributes?.statistics?.content?.sourceStats?.consolidated;
+<<<<<<< HEAD
+              const rowSourceId = attributes["source-id"];
+              const rowSourceLabel = sourceLabels.get(rowSourceId) || rowSourceId;
+=======
+>>>>>>> 237adf36c499f648c8cd17e090791a39b474c67a
               return (
                 <tr
                   key={job.id}
@@ -527,7 +705,17 @@ export default function IdHub({ onOpenLog }) {
                   <td style={{ padding: "8px 10px" }}>{duration(updates)}</td>
                   <td style={{ padding: "8px 10px" }}>{num(ingested)}</td>
                   <td style={{ padding: "8px 10px" }}>{num(consolidated)}</td>
+<<<<<<< HEAD
+                  <td
+                    className="idhub-table-source"
+                    style={{ padding: "8px 10px" }}
+                    title={rowSourceId || ""}
+                  >
+                    {rowSourceLabel}
+                  </td>
+=======
                   <td style={{ padding: "8px 10px" }}>{attributes["source-id"]}</td>
+>>>>>>> 237adf36c499f648c8cd17e090791a39b474c67a
                 </tr>
               );
             })}
@@ -542,7 +730,11 @@ export default function IdHub({ onOpenLog }) {
                   }}
                 >
                   {connected
+<<<<<<< HEAD
+                    ? "Choose a source and load jobs."
+=======
                     ? "No jobs loaded yet. Choose a source and click Load jobs."
+>>>>>>> 237adf36c499f648c8cd17e090791a39b474c67a
                     : "Connect to IDHub to browse jobs."}
                 </td>
               </tr>

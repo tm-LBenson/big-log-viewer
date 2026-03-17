@@ -7,7 +7,11 @@ import Row from "./Row";
 import IdHubDashboard from "./IdHubDashboard";
 
 export default function Viewer({ virt, lines, path }) {
+<<<<<<< HEAD
+  const { controls, lineBar, lineNums, htmlLight, colors, mode, wrap } = useSearch();
+=======
   const { controls, lineBar, lineNums, htmlLight, colors, mode } = useSearch();
+>>>>>>> 237adf36c499f648c8cd17e090791a39b474c67a
   const gutter = lineNums ? 72 : 0;
 
   const scrollerRef = useRef(null);
@@ -21,6 +25,10 @@ export default function Viewer({ virt, lines, path }) {
       <div
         ref={(el) => {
           scrollerRef.current = el;
+<<<<<<< HEAD
+          if (lines.scrollerRef) lines.scrollerRef.current = el;
+=======
+>>>>>>> 237adf36c499f648c8cd17e090791a39b474c67a
           if (typeof ref === "function") ref(el);
           else if (ref) ref.current = el;
         }}
@@ -128,6 +136,12 @@ export default function Viewer({ virt, lines, path }) {
           ref={lines.boxRef}
           style={{
             flex: 1,
+<<<<<<< HEAD
+            minHeight: 0,
+            minWidth: 0,
+            overflow: "hidden",
+=======
+>>>>>>> 237adf36c499f648c8cd17e090791a39b474c67a
             position: "relative",
             "--gutter": `${gutter}px`,
             "--row-hover": htmlLight ? colors.hover : undefined,
@@ -150,8 +164,16 @@ export default function Viewer({ virt, lines, path }) {
             ref={virt}
             totalCount={lines.windowCount}
             itemContent={(index) => <Row i={index} />}
+<<<<<<< HEAD
+            computeItemKey={(index) => lines.abs(index)}
             style={{ height: "100%", width: "100%", paddingRight: 20 }}
             overscan={KEEP * ROW}
+            defaultItemHeight={ROW}
+            fixedItemHeight={wrap ? undefined : ROW}
+=======
+            style={{ height: "100%", width: "100%", paddingRight: 20 }}
+            overscan={KEEP * ROW}
+>>>>>>> 237adf36c499f648c8cd17e090791a39b474c67a
             rangeChanged={lines.handleRange}
             components={{ Scroller, List }}
           />
