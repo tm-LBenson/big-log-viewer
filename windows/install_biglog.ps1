@@ -53,3 +53,4 @@ Move-Item -Path (Join-Path $tempPath $appName) `
 
 Write-Host "`n Built and placed '$appName' on your Desktop."
 Write-Host "   Run with: `"$desktopPath\$appName`" -logdir `"C:\path\to\logs`""
+
