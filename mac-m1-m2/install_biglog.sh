@@ -27,5 +27,9 @@ GOOS=darwin GOARCH=$(uname -m | sed 's/x86_64/amd64/;s/arm64/arm64/') \
   go build -o biglog ./cmd/biglog
 
 mv biglog "$DEST"
+META_PATH="$(dirname "$DEST")/$(basename "$DEST")-install.json"
+cat > "$META_PATH" <<JSON
+{"repoUrl":"$REPO","installScript":"mac-m1-m2/install_biglog.sh","installedAt":"$(date -u +%Y-%m-%dT%H:%M:%SZ)"}
+JSON
 echo "Built and placed $DEST"
 

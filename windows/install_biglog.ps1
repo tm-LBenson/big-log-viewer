@@ -48,9 +48,16 @@ Push-Location $tempPath
 go build -o $appName ./cmd/biglog
 Pop-Location
 
+$targetExe = Join-Path $desktopPath $appName
 Move-Item -Path (Join-Path $tempPath $appName) `
-          -Destination (Join-Path $desktopPath $appName) -Force
+          -Destination $targetExe -Force
+
+$metaPath = Join-Path $desktopPath "biglog-install.json"
+@{
+    repoUrl       = $repoUrl
+    installScript = "windows/install_biglog.ps1"
+    installedAt   = (Get-Date).ToUniversalTime().ToString("o")
+} | ConvertTo-Json | Set-Content -Path $metaPath -Encoding UTF8
 
 Write-Host "`n Built and placed '$appName' on your Desktop."
 Write-Host "   Run with: `"$desktopPath\$appName`" -logdir `"C:\path\to\logs`""
-

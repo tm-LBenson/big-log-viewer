@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import useSettings, {
   normalizeExtInput,
   applyBackend,
@@ -20,6 +20,80 @@ const FALLBACK_DEFAULTS = [
   ".css",
 ];
 
+const UPDATE_BUSY_STATES = new Set([
+  "checking",
+  "preparing",
+  "cloning",
+  "building",
+  "restarting",
+]);
+
+function shortBuildLabel(status) {
+  if (!status?.currentShort) return "Local build";
+  return status.currentModified
+    ? `${status.currentShort} (modified)`
+    : status.currentShort;
+}
+
+function latestBuildLabel(status) {
+  if (!status?.latestShort) return "Not checked yet";
+  return status.latestShort;
+}
+
+function updateHeadline(status) {
+  if (!status) return "Ready to check for updates.";
+  if (status.error) return status.error;
+  if (status.message) return status.message;
+  switch (status.state) {
+    case "checking":
+      return "Checking for updates…";
+    case "cloning":
+      return "Downloading the latest build…";
+    case "building":
+      return "Building the updated binary…";
+    case "restarting":
+      return "Restarting Big Log…";
+    default:
+      return "Ready to check for updates.";
+  }
+}
+
+function statusLabel(status) {
+  if (!status) return "Ready";
+  if (status.state === "error") return "Error";
+  if (status.state === "checked" && status.updateAvailable) return "Update available";
+  if (status.state === "checked" && !status.updateAvailable) return "Up to date";
+  if (UPDATE_BUSY_STATES.has(status.state)) return "Working";
+  return "Ready";
+}
+
+function shouldShowInstall(status) {
+  if (!status?.canApply) return false;
+  if (UPDATE_BUSY_STATES.has(status.state)) return false;
+  if (!status.latestRevision) return false;
+  return status.updateAvailable || !status.currentRevision;
+}
+
+async function parseResponse(response, fallbackMessage) {
+  const text = await response.text();
+  let data = null;
+  try {
+    data = text ? JSON.parse(text) : null;
+  } catch {
+    data = null;
+  }
+  if (!response.ok) {
+    throw new Error(
+      data?.error ||
+        data?.message ||
+        data?.lastError ||
+        text ||
+        `${fallbackMessage} (status ${response.status})`,
+    );
+  }
+  return data;
+}
+
 export default function Settings({ open, onClose }) {
   const store = useSettings();
   const init = useMemo(() => store.get(), []);
@@ -38,6 +112,20 @@ export default function Settings({ open, onClose }) {
     init.markColor || defaultSettings.markColor,
   );
   const [defaults, setDefaults] = useState(FALLBACK_DEFAULTS);
+  const [updateStatus, setUpdateStatus] = useState(null);
+  const [awaitingRestart, setAwaitingRestart] = useState(false);
+
+  const loadUpdateStatus = useCallback(async () => {
+    try {
+      const response = await fetch("/api/update/status", { cache: "no-store" });
+      if (!response.ok) throw new Error("Failed to load update status");
+      const data = await response.json();
+      setUpdateStatus(data);
+      return data;
+    } catch {
+      return null;
+    }
+  }, []);
 
   useEffect(() => {
     if (open) document.body.classList.add("modal-open");
@@ -60,11 +148,48 @@ export default function Settings({ open, onClose }) {
         if (!init.extensions?.length) setExtsText(def.join(", "));
       })
       .catch(() => {});
-  }, [open]);
+    loadUpdateStatus();
+  }, [open, init.extensions, init.rootPath, loadUpdateStatus]);
 
   useEffect(() => {
     document.documentElement.setAttribute("data-theme", theme);
   }, [theme]);
+
+  useEffect(() => {
+    if (!open) return undefined;
+    const active = awaitingRestart || UPDATE_BUSY_STATES.has(updateStatus?.state);
+    if (!active) return undefined;
+
+    const timer = window.setInterval(async () => {
+      try {
+        const response = await fetch("/api/update/status", { cache: "no-store" });
+        if (!response.ok) throw new Error("status unavailable");
+        const data = await response.json();
+        setUpdateStatus(data);
+        if (data.state === "restarting") {
+          setAwaitingRestart(true);
+          return;
+        }
+        if (data.state === "error") {
+          setAwaitingRestart(false);
+          return;
+        }
+        if (awaitingRestart && !UPDATE_BUSY_STATES.has(data.state)) {
+          window.location.reload();
+        }
+      } catch {
+        if (!awaitingRestart && updateStatus?.state !== "restarting") return;
+        try {
+          const ping = await fetch("/api/root", { cache: "no-store" });
+          if (ping.ok) window.location.reload();
+        } catch {
+          // keep waiting for the restarted server
+        }
+      }
+    }, 1200);
+
+    return () => window.clearInterval(timer);
+  }, [open, updateStatus?.state, awaitingRestart]);
 
   if (!open) return null;
 
@@ -89,6 +214,51 @@ export default function Settings({ open, onClose }) {
     setLineHL(defaultSettings.lineHighlightColor);
     setMarkColor(defaultSettings.markColor);
   };
+
+  const checkForUpdates = async () => {
+    setUpdateStatus((prev) => ({
+      ...(prev || {}),
+      state: "checking",
+      message: "Checking for updates…",
+      error: "",
+    }));
+    setAwaitingRestart(false);
+    try {
+      const response = await fetch("/api/update/check", {
+        method: "POST",
+      });
+      const data = await parseResponse(response, "Failed to check for updates");
+      setUpdateStatus(data);
+    } catch (error) {
+      setUpdateStatus((prev) => ({
+        ...(prev || {}),
+        state: "error",
+        message: "Failed to check for updates.",
+        error: error?.message || "Failed to check for updates.",
+      }));
+    }
+  };
+
+  const installUpdate = async () => {
+    try {
+      const response = await fetch("/api/update/apply", {
+        method: "POST",
+      });
+      const data = await parseResponse(response, "Failed to start the update");
+      setUpdateStatus(data);
+      setAwaitingRestart(true);
+    } catch (error) {
+      setUpdateStatus((prev) => ({
+        ...(prev || {}),
+        state: "error",
+        message: "Failed to start the update.",
+        error: error?.message || "Failed to start the update.",
+      }));
+      setAwaitingRestart(false);
+    }
+  };
+
+  const busyUpdating = UPDATE_BUSY_STATES.has(updateStatus?.state);
 
   return (
     <div className="modal">
@@ -194,6 +364,51 @@ export default function Settings({ open, onClose }) {
             value={markColor}
             onChange={(e) => setMarkColor(e.target.value)}
           />
+        </div>
+
+        <div className="settings-section">
+          <div className="settings-section__head">
+            <div>
+              <div className="settings-section__title">Updates</div>
+              <div className="settings-section__subtitle">{statusLabel(updateStatus)}</div>
+            </div>
+            <div className="settings-update-actions">
+              <button
+                className="btn"
+                onClick={checkForUpdates}
+                disabled={busyUpdating}
+              >
+                Check for updates
+              </button>
+              {shouldShowInstall(updateStatus) ? (
+                <button
+                  className="btn btn--primary"
+                  onClick={installUpdate}
+                  disabled={busyUpdating}
+                >
+                  Install update &amp; restart
+                </button>
+              ) : null}
+            </div>
+          </div>
+
+          <div className="settings-update-grid">
+            <div className="settings-update-row">
+              <span>Current build</span>
+              <strong>{shortBuildLabel(updateStatus)}</strong>
+            </div>
+            <div className="settings-update-row">
+              <span>Latest remote</span>
+              <strong>{latestBuildLabel(updateStatus)}</strong>
+            </div>
+          </div>
+
+          <div className="settings-update-note">{updateHeadline(updateStatus)}</div>
+          {!updateStatus?.canApply && updateStatus?.unsupportedReason ? (
+            <div className="hint settings-update-hint">
+              {updateStatus.unsupportedReason}
+            </div>
+          ) : null}
         </div>
 
         <div className="modal-actions">

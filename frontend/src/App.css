@@ -428,6 +428,74 @@ body.modal-open .menu {
   gap: 8px;
   margin-top: 8px;
 }
+
+.settings-section {
+  margin-top: 16px;
+  padding: 14px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--surface);
+}
+.settings-section__head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+.settings-section__title {
+  font-weight: 700;
+}
+.settings-section__subtitle {
+  margin-top: 3px;
+  font-size: 12px;
+  color: var(--text-weak);
+}
+.settings-update-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 8px;
+}
+.settings-update-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+  margin-top: 12px;
+}
+.settings-update-row {
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--panel);
+}
+.settings-update-row span {
+  display: block;
+  font-size: 12px;
+  color: var(--text-weak);
+  margin-bottom: 4px;
+}
+.settings-update-row strong {
+  font-size: 14px;
+}
+.settings-update-note {
+  margin-top: 12px;
+  font-size: 13px;
+  line-height: 1.45;
+}
+.settings-update-hint {
+  margin-top: 8px;
+}
+@media (max-width: 640px) {
+  .settings-section__head {
+    flex-direction: column;
+  }
+  .settings-update-actions {
+    justify-content: flex-start;
+  }
+  .settings-update-grid {
+    grid-template-columns: 1fr;
+  }
+}
 /* --- IDHub page helpers --- */
 .tbl {
   width: 100%;
