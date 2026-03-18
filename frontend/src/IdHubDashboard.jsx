@@ -1,214 +1,217 @@
 import { useEffect, useMemo, useState } from "react";
+import { parseIdHubLog } from "./idhubDashboardUtils";
 
-function redact(x) {
-  if (x == null || typeof x !== "object") return x;
-  if (Array.isArray(x)) return x.map(redact);
-  const o = {};
-  for (const [k, v] of Object.entries(x)) {
-    const secret =
-      /password|secret|privatekey|clientsecret|keystore|token/i.test(k);
-    o[k] = secret ? "••••••" : redact(v);
-  }
-  return o;
+const numberFmt = new Intl.NumberFormat();
+
+function formatNumber(value) {
+  if (value == null || value === "") return "—";
+  if (typeof value === "number") return numberFmt.format(value);
+  return String(value);
 }
 
-function parseJsonAt(s, from) {
-  let i = from,
-    depth = 0,
-    inStr = false,
-    esc = false,
-    start = -1;
-  for (; i < s.length; i++) {
-    const c = s[i];
-    if (inStr) {
-      if (esc) esc = false;
-      else if (c === "\\") esc = true;
-      else if (c === '"') inStr = false;
-      continue;
-    }
-    if (c === '"') {
-      inStr = true;
-      continue;
-    }
-    if (c === "{") {
-      if (depth === 0) start = i;
-      depth++;
-      continue;
-    }
-    if (c === "}") {
-      depth--;
-      if (depth === 0 && start !== -1)
-        return { raw: s.slice(start, i + 1), endIdx: i + 1, startIdx: start };
-    }
-  }
-  return null;
-}
-
-function findResourceBlocks(text) {
-  const out = [];
-  const re = /resources\.json\s*:/gi;
-  let m;
-  while ((m = re.exec(text))) {
-    let j = m.index + m[0].length;
-    while (j < text.length && text[j] !== "{" && text[j] !== "\n") j++;
-    if (j >= text.length) break;
-    const first = text.indexOf("{", j);
-    if (first === -1) break;
-    const seg = parseJsonAt(text, first);
-    if (!seg) continue;
-    const startLine =
-      (text.slice(0, seg.startIdx).match(/\n/g) || []).length + 1;
-    const endLine =
-      startLine +
-      (text.slice(seg.startIdx, seg.endIdx).match(/\n/g) || []).length;
-    try {
-      out.push({ startLine, endLine, data: JSON.parse(seg.raw) });
-    } catch {}
-    re.lastIndex = seg.endIdx;
-  }
-  return out;
-}
-
-function findBatchOrchestratorSummaries(text) {
-  const out = [];
-  const re = /BatchOrchestrator\s*-\s*{/g;
-  let m;
-  while ((m = re.exec(text))) {
-    const seg = parseJsonAt(text, m.index + m[0].length - 1);
-    if (!seg) continue;
-    try {
-      out.push(JSON.parse(seg.raw));
-    } catch {}
-    re.lastIndex = seg.endIdx;
-  }
-  return out;
-}
-
-function parseThresholdLine(text) {
-  const m = text.match(
-    /Threshold exceeded\s*=\s*(true|false).*?Source count:\s*(\d+).*?Add count\s*=\s*(\d+).*?Delete count\s*=\s*(\d+).*?Modify count\s*=\s*(\d+)/i,
-  );
-  if (!m) return null;
-  return {
-    exceeded: m[1].toLowerCase() === "true",
-    source: +m[2],
-    add: +m[3],
-    del: +m[4],
-    mod: +m[5],
-  };
-}
-
-function Card({ title, children, style }) {
+function Card({ title, subtitle, actions, className = "", children }) {
   return (
-    <div
-      style={{
-        border: "1px solid var(--border)",
-        borderRadius: 8,
-        padding: 12,
-        background: "var(--surface)",
-        ...style,
-      }}
-    >
-      <div style={{ fontWeight: 600, marginBottom: 8 }}>{title}</div>
-      <div style={{ fontSize: 13, lineHeight: 1.45 }}>{children}</div>
+    <section className={`idhub-dash__card ${className}`.trim()}>
+      <div className="idhub-dash__card-head">
+        <div>
+          <h3 className="idhub-dash__card-title">{title}</h3>
+          {subtitle && <div className="idhub-dash__card-subtitle">{subtitle}</div>}
+        </div>
+        {actions ? <div className="idhub-dash__card-actions">{actions}</div> : null}
+      </div>
+      <div className="idhub-dash__card-body">{children}</div>
+    </section>
+  );
+}
+
+function StatusPill({ tone, children }) {
+  return (
+    <span className={`idhub-dash__status-pill is-${tone}`}>
+      {children}
+    </span>
+  );
+}
+
+function InfoChip({ tone = "neutral", children }) {
+  return <span className={`idhub-dash__chip is-${tone}`}>{children}</span>;
+}
+
+function MetricGrid({ items }) {
+  const visible = items.filter((item) => item && item.value != null && item.value !== "");
+  if (!visible.length) {
+    return <div className="idhub-dash__empty">No summary data was found in this log.</div>;
+  }
+  return (
+    <div className="idhub-dash__metrics">
+      {visible.map((item) => (
+        <div
+          key={item.label}
+          className={`idhub-dash__metric ${item.tone ? `is-${item.tone}` : ""}`.trim()}
+        >
+          <div className="idhub-dash__metric-label">{item.label}</div>
+          <div className="idhub-dash__metric-value">{formatNumber(item.value)}</div>
+          {item.note ? <div className="idhub-dash__metric-note">{item.note}</div> : null}
+        </div>
+      ))}
     </div>
   );
 }
 
-function Pair({ k, v }) {
+function DetailList({ rows }) {
+  const visible = rows.filter((row) => row.value != null && row.value !== "");
   return (
-    <div
-      style={{
-        display: "grid",
-        gridTemplateColumns: "140px 1fr",
-        gap: 8,
-        marginBottom: 6,
-      }}
-    >
-      <div style={{ color: "var(--text-weak)" }}>{k}</div>
-      <div style={{ overflowWrap: "anywhere" }}>{v}</div>
+    <div className="idhub-dash__details">
+      {visible.map((row) => (
+        <div
+          key={row.label}
+          className="idhub-dash__detail-row"
+        >
+          <div className="idhub-dash__detail-label">{row.label}</div>
+          <div className="idhub-dash__detail-value">{formatNumber(row.value)}</div>
+        </div>
+      ))}
     </div>
   );
 }
 
-function Table({ rows, columns }) {
+function SystemValue({ total, failed = 0 }) {
+  if (!total) return <span className="idhub-dash__muted">—</span>;
   return (
-    <div style={{ overflow: "auto" }}>
-      <table style={{ width: "100%", borderCollapse: "collapse" }}>
+    <span className={failed ? "idhub-dash__table-value is-warn" : "idhub-dash__table-value"}>
+      {formatNumber(total)}
+      {failed ? <small>{formatNumber(failed)} failed</small> : null}
+    </span>
+  );
+}
+
+function SystemsTable({ systems }) {
+  if (!systems.length) {
+    return <div className="idhub-dash__empty">No system action summary was found in this log.</div>;
+  }
+  return (
+    <div className="idhub-dash__table-wrap">
+      <table className="idhub-dash__table">
         <thead>
           <tr>
-            {columns.map((c) => (
-              <th
-                key={c.key}
-                style={{
-                  textAlign: "left",
-                  padding: "6px 8px",
-                  background: "var(--surface)",
-                }}
-              >
-                {c.label}
-              </th>
-            ))}
+            <th>System</th>
+            <th>People created</th>
+            <th>People updated</th>
+            <th>People deleted</th>
+            <th>Group updates</th>
+            <th>Failures</th>
           </tr>
         </thead>
         <tbody>
-          {rows.length ? (
-            rows.map((r, i) => (
-              <tr
-                key={i}
-                style={{ borderBottom: "1px solid var(--border)" }}
-              >
-                {columns.map((c) => (
-                  <td
-                    key={c.key}
-                    style={{ padding: "6px 8px", verticalAlign: "top" }}
-                  >
-                    {r[c.key]}
-                  </td>
-                ))}
-              </tr>
-            ))
-          ) : (
-            <tr>
-              <td
-                colSpan={columns.length}
-                style={{ padding: 10, color: "var(--text-weak)" }}
-              >
-                none
+          {systems.map((system) => (
+            <tr key={system.id}>
+              <td>
+                <div className="idhub-dash__table-primary">{system.name}</div>
+                {system.rawName && system.rawName !== system.name ? (
+                  <div className="idhub-dash__table-secondary">{system.rawName}</div>
+                ) : null}
+              </td>
+              <td>
+                <SystemValue
+                  total={system.people.actions.created?.total}
+                  failed={system.people.actions.created?.failed}
+                />
+              </td>
+              <td>
+                <SystemValue
+                  total={system.people.actions.updated?.total}
+                  failed={system.people.actions.updated?.failed}
+                />
+              </td>
+              <td>
+                <SystemValue
+                  total={system.people.actions.deleted?.total}
+                  failed={system.people.actions.deleted?.failed}
+                />
+              </td>
+              <td>
+                <SystemValue
+                  total={system.groups.actions.updated?.total}
+                  failed={system.groups.actions.updated?.failed}
+                />
+              </td>
+              <td>
+                {system.failed ? (
+                  <span className="idhub-dash__table-value is-warn">
+                    {formatNumber(system.failed)}
+                  </span>
+                ) : (
+                  <span className="idhub-dash__muted">0</span>
+                )}
               </td>
             </tr>
-          )}
+          ))}
         </tbody>
       </table>
     </div>
   );
 }
 
-function filterNormalLines(text, jsonBlocks) {
-  const ranges = jsonBlocks.map((b) => [b.startLine, b.endLine]);
-  const lines = text.split("\n");
-  const out = [];
-  for (let i = 0; i < lines.length; i++) {
-    const ln = i + 1;
-    const inJson = ranges.some(([a, b]) => ln >= a && ln <= b);
-    if (inJson) continue;
-    const s = lines[i];
-    if (/resources\.json\s*:/i.test(s)) continue;
-    if (
-      /^\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}/.test(s) &&
-      /\b(INFO|DEBUG|WARN|ERROR|TRACE)\b/.test(s)
-    )
-      out.push(s);
+function IssuesPanel({ failureBreakdown, issueSamples, warnCount, errorCount }) {
+  if (!failureBreakdown.length && !issueSamples.length) {
+    return <div className="idhub-dash__empty">No warnings or failures were detected in the parsed summary.</div>;
   }
-  return out;
+  return (
+    <div className="idhub-dash__issues">
+      <div className="idhub-dash__issue-summary">
+        {errorCount ? <InfoChip tone="error">{formatNumber(errorCount)} errors</InfoChip> : null}
+        {warnCount ? <InfoChip tone="warn">{formatNumber(warnCount)} warnings</InfoChip> : null}
+        {failureBreakdown.slice(0, 6).map((item) => (
+          <InfoChip
+            key={item.key}
+            tone="warn"
+          >
+            {item.label}: {formatNumber(item.count)}
+          </InfoChip>
+        ))}
+      </div>
+
+      {issueSamples.length ? (
+        <div className="idhub-dash__issue-list">
+          {issueSamples.map((item, index) => (
+            <div
+              key={`${item.timestamp}-${index}`}
+              className="idhub-dash__issue-item"
+            >
+              <div className="idhub-dash__issue-meta">
+                <span className={`idhub-dash__level-pill is-${item.level}`}>{item.level.toUpperCase()}</span>
+                {item.timestamp ? <span>{item.timestamp}</span> : null}
+                {item.logger ? <span className="idhub-dash__muted">{item.logger}</span> : null}
+              </div>
+              <div className="idhub-dash__issue-text">{item.message}</div>
+            </div>
+          ))}
+        </div>
+      ) : null}
+    </div>
+  );
 }
 
-function firstLine(text, re) {
-  const m = text.match(re);
-  if (!m) return "";
-  const start = m.index;
-  const end = text.indexOf("\n", start);
-  return text.slice(start, end === -1 ? undefined : end);
+function LogOutput({ lines }) {
+  if (!lines.length) {
+    return <div className="idhub-dash__empty">No non-JSON lines were found in this log.</div>;
+  }
+  return (
+    <div className="idhub-dash__logfeed">
+      {lines.map((line) => (
+        <div
+          key={line.id}
+          className={`idhub-dash__logline is-${line.level}`}
+        >
+          {line.timestamp ? <span className="idhub-dash__logtime">{line.timestamp}</span> : null}
+          {line.level !== "plain" ? (
+            <span className={`idhub-dash__level-pill is-${line.level}`}>{line.level.toUpperCase()}</span>
+          ) : null}
+          {line.logger ? <span className="idhub-dash__loglogger">{line.logger}</span> : null}
+          <span className="idhub-dash__logmessage">{line.message || line.raw}</span>
+        </div>
+      ))}
+    </div>
+  );
 }
 
 export default function IdHubDashboard({ path }) {
@@ -217,407 +220,143 @@ export default function IdHubDashboard({ path }) {
   const [error, setError] = useState("");
 
   useEffect(() => {
-    let cancel = false;
+    let cancelled = false;
     setLoading(true);
     setError("");
     setRaw("");
+
     fetch(`/api/raw?path=${encodeURIComponent(path)}`)
-      .then((r) => (r.ok ? r.text() : Promise.reject()))
-      .then((t) => {
-        if (!cancel) setRaw(t);
+      .then((response) => (response.ok ? response.text() : Promise.reject(new Error("load"))))
+      .then((text) => {
+        if (!cancelled) setRaw(text);
       })
       .catch(() => {
-        if (!cancel) setError("failed to load log");
+        if (!cancelled) setError("failed to load log");
       })
       .finally(() => {
-        if (!cancel) setLoading(false);
+        if (!cancelled) setLoading(false);
       });
+
     return () => {
-      cancel = true;
+      cancelled = true;
     };
   }, [path]);
 
-  const resourceBlocks = useMemo(
-    () => (raw ? findResourceBlocks(raw) : []),
-    [raw],
-  );
-  const latestResources = useMemo(
-    () =>
-      resourceBlocks.length
-        ? redact(resourceBlocks[resourceBlocks.length - 1].data)
-        : null,
-    [resourceBlocks],
-  );
-  const boSummaries = useMemo(() => findBatchOrchestratorSummaries(raw), [raw]);
-  const latestBo = useMemo(
-    () => (boSummaries.length ? boSummaries[boSummaries.length - 1] : null),
-    [boSummaries],
-  );
-  const thresholdLine = useMemo(() => parseThresholdLine(raw), [raw]);
-  const normals = useMemo(
-    () => filterNormalLines(raw, resourceBlocks),
-    [raw, resourceBlocks],
-  );
+  const parsed = useMemo(() => (raw ? parseIdHubLog(raw) : null), [raw]);
 
-  const thresholdDisabled = useMemo(
-    () => /Threshold checking has been disabled for this job run\./i.test(raw),
-    [raw],
-  );
-  const jobFailed = useMemo(
-    () =>
-      /failed to complete batch job|job failed|uncategorizederror/i.test(raw),
-    [raw],
-  );
-  const jobSucceeded = useMemo(
-    () =>
-      !jobFailed &&
-      /\b(Pipeline complete|finished|completed successfully)\b/i.test(raw),
-    [raw, jobFailed],
-  );
+  const sourceMetrics = useMemo(() => {
+    if (!parsed) return [];
+    const diff = parsed.sourceDiff;
+    const hasAny = Object.values(diff).some((value) => value != null);
+    if (!hasAny) return [];
+    return [
+      { label: "Source records", value: diff.sourceRecords },
+      { label: "Adds", value: diff.adds, tone: "success" },
+      { label: "Updates", value: diff.modifies },
+      { label: "Deletes", value: diff.deletes },
+      { label: "Matched", value: diff.matched },
+      { label: "Scheduled for deletion", value: diff.scheduledForDeletion },
+      { label: "Ingested", value: diff.ingested },
+      { label: "Consolidated", value: diff.consolidated },
+    ];
+  }, [parsed]);
 
-  const failLine = useMemo(
-    () =>
-      firstLine(
-        raw,
-        /failed to complete batch job|job failed|uncategorizederror/i,
-      ),
-    [raw],
-  );
-  const successLine = useMemo(
-    () =>
-      firstLine(
-        raw,
-        /\b(Pipeline complete|finished|completed successfully)\b/i,
-      ),
-    [raw],
-  );
+  const provisioningMetrics = useMemo(() => {
+    if (!parsed || !parsed.systems.length) return [];
+    return [
+      { label: "Created", value: parsed.actionTotals.people.created, tone: "success" },
+      { label: "Updated", value: parsed.actionTotals.people.updated },
+      { label: "Deleted", value: parsed.actionTotals.people.deleted },
+      { label: "Failed", value: parsed.actionTotals.people.failed, tone: parsed.actionTotals.people.failed ? "warn" : "neutral" },
+      { label: "Moved", value: parsed.actionTotals.people.moved },
+      { label: "Disabled", value: parsed.actionTotals.people.disabled },
+      { label: "Enabled", value: parsed.actionTotals.people.enabled },
+      { label: "Group updates", value: parsed.actionTotals.groups.updated },
+    ];
+  }, [parsed]);
 
-  const job = latestResources?.jobInfo || {};
-  const tenant = latestResources?.tenantApiInfo?.tenant || null;
-  const domains = latestResources?.tenantApiInfo?.domains || null;
-  const source = latestResources?.source || null;
-  const policies = Array.isArray(latestResources?.policies)
-    ? latestResources.policies
-    : [];
-  const sinks = Array.isArray(latestResources?.sinks)
-    ? latestResources.sinks
-    : [];
-  const bridges = Array.isArray(latestResources?.bridges)
-    ? latestResources.bridges
-    : [];
-  const idStore = latestResources?.identityStore || null;
-  const schemas = Array.isArray(latestResources?.schemas)
-    ? latestResources.schemas
-    : idStore?.schemas || null;
-  const stats = latestResources?.statistics?.content?.sourceStats || null;
-
-  const summaryCounts = useMemo(() => {
-    const out = {};
-    if (stats && stats.ingested != null) out.ingested = stats.ingested;
-    if (stats && stats.consolidated != null)
-      out.consolidated = stats.consolidated;
-    if (latestBo && latestBo.calculatedDiffStats) {
-      const c = latestBo.calculatedDiffStats;
-      if (c.matched != null) out.matched = c.matched;
-      if (c.scheduledForDeletion != null)
-        out.scheduledForDeletion = c.scheduledForDeletion;
-    }
-    if (thresholdLine) {
-      out.add = thresholdLine.add;
-      out.delete = thresholdLine.del;
-      out.modify = thresholdLine.mod;
-      out.source = thresholdLine.source;
-      out.thresholdExceeded = thresholdLine.exceeded;
-    }
-    const nonzero = Object.entries(out).filter(([, v]) =>
-      typeof v === "number" ? v !== 0 : v != null,
-    );
-    return nonzero.length ? out : null;
-  }, [stats, latestBo, thresholdLine]);
-
-  if (loading)
-    return <main className="viewer center">building dashboard…</main>;
+  if (loading) return <main className="viewer center">building dashboard…</main>;
   if (error) return <main className="viewer center">{error}</main>;
+  if (!parsed) return <main className="viewer center">No data</main>;
 
   return (
-    <div style={{ display: "flex", flexDirection: "column", height: "100%" }}>
-      <div className="toolbar">
-        <div style={{ fontSize: 13, color: "var(--text-weak)" }}>
-          {resourceBlocks.length
-            ? `Extracted ${resourceBlocks.length} resources.json block${
-                resourceBlocks.length > 1 ? "s" : ""
-              } • showing latest`
-            : "No resources.json block detected"}
+    <div className="idhub-dash">
+      <div className="idhub-dash__hero">
+        <div className="idhub-dash__hero-copy">
+          <div className="idhub-dash__eyebrow">IDHub job summary</div>
+          <div className="idhub-dash__hero-line">
+            <StatusPill tone={parsed.status.tone}>{parsed.status.label}</StatusPill>
+            <div className="idhub-dash__hero-detail">{parsed.status.detail}</div>
+          </div>
+          <div className="idhub-dash__hero-chips">
+            <InfoChip>{parsed.resourceBlocks.length} resources.json block{parsed.resourceBlocks.length === 1 ? "" : "s"}</InfoChip>
+            <InfoChip tone={parsed.summaryBlocks.length ? "success" : "neutral"}>
+              {parsed.summaryBlocks.length ? "Batch summary found" : "No batch summary found"}
+            </InfoChip>
+            {parsed.thresholdDisabled ? <InfoChip tone="warn">Thresholds disabled</InfoChip> : null}
+            {parsed.threshold?.exceeded ? <InfoChip tone="error">Threshold exceeded</InfoChip> : null}
+            {parsed.errorCount ? <InfoChip tone="error">{formatNumber(parsed.errorCount)} error lines</InfoChip> : null}
+            {parsed.warnCount ? <InfoChip tone="warn">{formatNumber(parsed.warnCount)} warning lines</InfoChip> : null}
+          </div>
         </div>
-        <div className="spacer" />
+
         <button
           className="btn"
-          onClick={() =>
-            window.open(`/api/raw?path=${encodeURIComponent(path)}`, "_blank")
-          }
+          onClick={() => window.open(`/api/raw?path=${encodeURIComponent(path)}`, "_blank")}
         >
           Open original log
         </button>
       </div>
 
-      <div style={{ padding: 12 }}>
-        {thresholdDisabled && (
-          <div
-            style={{
-              background: "#FEF3C7",
-              color: "#92400E",
-              border: "1px solid #FDE68A",
-              borderRadius: 8,
-              padding: 10,
-              marginBottom: 10,
-            }}
-          >
-            Threshold checking is disabled for this run
-          </div>
-        )}
-        {jobFailed && (
-          <div
-            style={{
-              background: "#FEE2E2",
-              color: "#991B1B",
-              border: "1px solid #FCA5A5",
-              borderRadius: 8,
-              padding: 10,
-              marginBottom: 10,
-            }}
-          >
-            Job failed{failLine ? `: ${failLine}` : ""}
-          </div>
-        )}
-        {!jobFailed && jobSucceeded && (
-          <div
-            style={{
-              background: "#DCFCE7",
-              color: "#065F46",
-              border: "1px solid #86EFAC",
-              borderRadius: 8,
-              padding: 10,
-              marginBottom: 10,
-            }}
-          >
-            Job finished{successLine ? `: ${successLine}` : ""}
-          </div>
-        )}
-      </div>
-
-      <div
-        style={{
-          padding: 12,
-          overflow: "auto",
-          display: "grid",
-          gridTemplateColumns: "repeat(2, minmax(320px, 1fr))",
-          gap: 12,
-          gridAutoRows: "minmax(100px, auto)",
-          flex: 1,
-        }}
-      >
-        {summaryCounts && (
-          <Card
-            title="Summary"
-            style={{ gridColumn: "1 / -1" }}
-          >
-            <div
-              style={{
-                display: "grid",
-                gridTemplateColumns: "repeat(4, minmax(100px, 1fr))",
-                gap: 10,
-              }}
-            >
-              {Object.entries(summaryCounts).map(([k, v]) => (
-                <div
-                  key={k}
-                  style={{
-                    border: "1px solid var(--border)",
-                    borderRadius: 8,
-                    padding: 10,
-                    textAlign: "center",
-                  }}
-                >
-                  <div
-                    style={{
-                      fontSize: 12,
-                      color: "var(--text-weak)",
-                      textTransform: "capitalize",
-                    }}
-                  >
-                    {k}
-                  </div>
-                  <div style={{ fontSize: 20, fontWeight: 700 }}>
-                    {String(v)}
-                  </div>
-                </div>
-              ))}
-            </div>
-          </Card>
-        )}
-
-        {latestResources && (
-          <Card title="Job">
-            <Pair
-              k="Job ID"
-              v={job.jobId || "—"}
-            />
-            <Pair
-              k="Invocation"
-              v={job.invocationType || "—"}
-            />
-            <Pair
-              k="Ingested"
-              v={stats && stats.ingested != null ? String(stats.ingested) : "—"}
-            />
-            <Pair
-              k="Consolidated"
-              v={
-                stats && stats.consolidated != null
-                  ? String(stats.consolidated)
-                  : "—"
-              }
-            />
-          </Card>
-        )}
-
-        {latestResources && tenant && (
-          <Card title="Tenant">
-            <Pair
-              k="Name"
-              v={tenant.tenantName || "—"}
-            />
-            <Pair
-              k="RI Tenant ID"
-              v={tenant.riTenantId || "—"}
-            />
-            <Pair
-              k="LCS Tenant ID"
-              v={tenant.lcsTenantId || "—"}
-            />
-            {domains && (
-              <>
-                <Pair
-                  k="Domain"
-                  v={domains.domain || "—"}
-                />
-                <Pair
-                  k="Vanity"
-                  v={domains.vanityDomain || "—"}
-                />
-              </>
-            )}
-          </Card>
-        )}
-
-        {latestResources && idStore && (
-          <Card title="Identity Store">
-            <Pair
-              k="Host"
-              v={
-                idStore.connection
-                  ? `${idStore.connection.host || "—"}:${
-                      idStore.connection.port || "—"
-                    }`
-                  : "—"
-              }
-            />
-            {Array.isArray(schemas) && schemas.length > 0 && (
-              <Pair
-                k="Schemas"
-                v={schemas.map((s) => s.schemaPath || s).join(", ")}
-              />
-            )}
-          </Card>
-        )}
-
-        {latestResources && source && (
-          <Card title="Source">
-            <Pair
-              k="Adapter"
-              v={source.sourceAdapterInfo?.className || "—"}
-            />
-            <Pair
-              k="Map Rules"
-              v={
-                Array.isArray(source.mapRulesWithArgs)
-                  ? `${source.mapRulesWithArgs.length} rule set(s)`
-                  : "—"
-              }
-            />
-          </Card>
-        )}
-
-        {latestResources && (
-          <Card title="Policies">
-            <Table
-              columns={[
-                { key: "name", label: "Name" },
-                { key: "scope", label: "Scope" },
-              ]}
-              rows={
-                Array.isArray(policies)
-                  ? policies.map((p) => ({
-                      name: p.name || "—",
-                      scope: p.scope || "—",
-                    }))
-                  : []
-              }
-            />
-          </Card>
-        )}
-
-        {latestResources && (
-          <Card title="Sinks">
-            <Table
-              columns={[
-                { key: "adapter", label: "Adapter" },
-                { key: "scope", label: "Scope" },
-              ]}
-              rows={
-                Array.isArray(sinks)
-                  ? sinks.map((s) => ({
-                      adapter: s.sinkAdapterInfo?.className || "—",
-                      scope:
-                        (s.scopes && (s.scopes.PERSON || s.scopes.person)) ||
-                        "—",
-                    }))
-                  : []
-              }
-            />
-          </Card>
-        )}
-
-        {latestResources && Array.isArray(bridges) && bridges.length > 0 && (
-          <Card title="Bridges">
-            <Table
-              columns={[
-                { key: "host", label: "Host" },
-                { key: "port", label: "Port" },
-              ]}
-              rows={bridges.map((b) => ({
-                host: b.host || "—",
-                port: String(b.port ?? "—"),
-              }))}
-            />
-          </Card>
-        )}
+      <div className="idhub-dash__grid">
+        <Card
+          title="Source changes"
+          subtitle="The overall diff for this run. This avoids treating one bad line as a failed job."
+        >
+          <MetricGrid items={sourceMetrics} />
+        </Card>
 
         <Card
-          title="Log messages"
-          style={{ gridColumn: "1 / -1" }}
+          title="Provisioning results"
+          subtitle="Actions actually attempted across the ID Store and configured sinks."
         >
-          <div
-            style={{
-              maxHeight: 260,
-              overflow: "auto",
-              fontFamily: "var(--mono)",
-              fontSize: 12,
-              whiteSpace: "pre-wrap",
-            }}
-          >
-            {normals.slice(-1000).join("\n") || "none"}
-          </div>
+          <MetricGrid items={provisioningMetrics} />
+        </Card>
+
+        <Card
+          title="Run details"
+          subtitle="Tenant, source, and target context pulled from resources.json."
+        >
+          <DetailList rows={parsed.detailRows} />
+        </Card>
+
+        <Card
+          title="Systems"
+          subtitle="Per-system outcome summary. Failures are shown in-line instead of flagging the whole job as failed."
+          className="idhub-dash__card--span"
+        >
+          <SystemsTable systems={parsed.systems} />
+        </Card>
+
+        <Card
+          title="Warnings & failures"
+          subtitle="Sample issues and parsed failure breakdowns from the summary JSON."
+          className="idhub-dash__card--span"
+        >
+          <IssuesPanel
+            failureBreakdown={parsed.failureBreakdown}
+            issueSamples={parsed.issueSamples}
+            warnCount={parsed.warnCount}
+            errorCount={parsed.errorCount}
+          />
+        </Card>
+
+        <Card
+          title="Log output"
+          subtitle="All non-JSON lines from the job log."
+          className="idhub-dash__card--span"
+        >
+          <LogOutput lines={parsed.logLines} />
         </Card>
       </div>
     </div>

@@ -25,6 +25,7 @@ body {
   --muted: #263a57;
   --hover: #1a2e4b;
   --ring: rgba(31, 122, 234, 0.5);
+  --mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
 }
 
 [data-theme="light"] {

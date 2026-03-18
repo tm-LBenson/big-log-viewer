@@ -94,7 +94,7 @@ export default function Viewer({ virt, lines, path }) {
         height: "100%",
         display: "flex",
         flexDirection: "column",
-        paddingLeft: 8,
+        paddingLeft: mode === "idhub" ? 0 : 8,
       }}
     >
       <nav className="toolbar">
