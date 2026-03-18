@@ -1,14 +1,17 @@
 import { useState, useRef, useEffect, useCallback, useLayoutEffect } from "react";
 import { PAGE, WINDOW_MAX, HALF_WIN, ROW, HANDLE, SPEED } from "./constants";
 
-const LOW_WATER = Math.floor(HALF_WIN / 2);
-const HIGH_WATER = WINDOW_MAX - LOW_WATER;
+const TOP_REBASE_TRIGGER = 1;
+const BOTTOM_REBASE_TRIGGER = HALF_WIN;
 const JUMP_RELEASE_DELAY = 220;
-const JUMP_SETTLE_ATTEMPTS = 6;
+const NON_EDGE_MIN_FRAMES = 1;
+const NON_EDGE_MAX_FRAMES = 20;
+const NON_EDGE_STABLE_FRAMES = 2;
 const EDGE_PIN_MIN_FRAMES = 10;
 const EDGE_PIN_MAX_FRAMES = 24;
 const EDGE_STABLE_FRAMES = 3;
 const EDGE_TOLERANCE = 2;
+const ALIGN_TOLERANCE = 16;
 
 function isNearTop(scroller) {
   return !scroller || scroller.scrollTop <= EDGE_TOLERANCE;
@@ -55,6 +58,7 @@ export default function useLines(path, virt) {
   const pendingScroll = useRef(null);
   const scrollRequestId = useRef(0);
   const programmaticJump = useRef(null);
+  const lastRange = useRef(null);
 
   const clampLine = useCallback(
     (line) => Math.max(0, Math.min(Math.max(0, lineCount - 1), line)),
@@ -73,6 +77,41 @@ export default function useLines(path, virt) {
     },
     [lineCount],
   );
+
+  const isScrollRequestSettled = useCallback((request, currentBase) => {
+    const range = lastRange.current;
+    if (!range || range.base !== currentBase) return false;
+
+    if (request.edge === "top") {
+      return range.startIndex <= ALIGN_TOLERANCE && isNearTop(scrollerRef.current);
+    }
+
+    if (request.edge === "bottom") {
+      return (
+        range.endIndex >= Math.max(0, windowCount - 1 - ALIGN_TOLERANCE) &&
+        isNearBottom(scrollerRef.current)
+      );
+    }
+
+    const visible = request.index >= range.startIndex && request.index <= range.endIndex;
+    if (!visible) return false;
+
+    if (request.align === "start") {
+      return Math.abs(range.startIndex - request.index) <= ALIGN_TOLERANCE;
+    }
+
+    if (request.align === "end") {
+      return Math.abs(range.endIndex - request.index) <= ALIGN_TOLERANCE;
+    }
+
+    return true;
+  }, [windowCount]);
+
+  const cancelProgrammaticScroll = useCallback(() => {
+    pendingScroll.current = null;
+    programmaticJump.current = null;
+    scrollRequestId.current += 1;
+  }, []);
 
   const releaseProgrammaticJump = useCallback((requestId) => {
     if (programmaticJump.current?.id === requestId) {
@@ -148,23 +187,18 @@ export default function useLines(path, virt) {
       const scroller = scrollerRef.current;
       forceScrollerEdge(scroller, request.edge);
 
-      const settled =
-        request.edge === "top"
-          ? isNearTop(scroller)
-          : request.edge === "bottom"
-            ? isNearBottom(scroller)
-            : attempt > 0;
-
+      const settled = isScrollRequestSettled(request, base);
       stableFrames = settled ? stableFrames + 1 : 0;
 
-      const reachedMinFrames =
-        !request.edge || attempt >= EDGE_PIN_MIN_FRAMES;
+      const reachedMinFrames = request.edge
+        ? attempt >= EDGE_PIN_MIN_FRAMES
+        : attempt >= NON_EDGE_MIN_FRAMES;
       const reachedMaxFrames = request.edge
         ? attempt >= EDGE_PIN_MAX_FRAMES
-        : attempt >= JUMP_SETTLE_ATTEMPTS;
+        : attempt >= NON_EDGE_MAX_FRAMES;
       const stableEnough = request.edge
         ? stableFrames >= EDGE_STABLE_FRAMES
-        : settled;
+        : stableFrames >= NON_EDGE_STABLE_FRAMES;
 
       if ((reachedMinFrames && stableEnough) || reachedMaxFrames) {
         finish();
@@ -181,7 +215,13 @@ export default function useLines(path, virt) {
       cancelAnimationFrame(frameId);
       window.clearTimeout(releaseTimer);
     };
-  }, [base, windowCount, scrollVersion, virt, releaseProgrammaticJump]);
+  }, [
+    base,
+    isScrollRequestSettled,
+    scrollVersion,
+    virt,
+    releaseProgrammaticJump,
+  ]);
 
   const fetchPage = useCallback(
     (p) => {
@@ -229,6 +269,7 @@ export default function useLines(path, virt) {
     pending.current.clear();
     pendingScroll.current = null;
     programmaticJump.current = null;
+    lastRange.current = null;
 
     setReady(false);
     setError("");
@@ -367,21 +408,22 @@ export default function useLines(path, virt) {
   const handleRange = useCallback(
     ({ startIndex, endIndex }) => {
       ensure(base + startIndex, base + endIndex);
+      lastRange.current = { base, startIndex, endIndex };
 
       if (programmaticJump.current) {
         return;
       }
 
       const remainingBelow = lineCount - (base + windowCount);
-      if (startIndex > HIGH_WATER && remainingBelow > 0) {
+      if (startIndex >= BOTTOM_REBASE_TRIGGER && remainingBelow > 0) {
         const shift = Math.min(HALF_WIN, remainingBelow);
-        syncWindow(base + shift, startIndex - shift, "start");
+        syncWindow(base + shift, startIndex - shift, "start", { lock: true });
         return;
       }
 
-      if (startIndex < LOW_WATER && base > 0) {
+      if (startIndex <= TOP_REBASE_TRIGGER && base > 0) {
         const shift = Math.min(HALF_WIN, base);
-        syncWindow(base - shift, startIndex + shift, "start");
+        syncWindow(base - shift, startIndex + shift, "start", { lock: true });
       }
     },
     [base, ensure, lineCount, syncWindow, windowCount],
@@ -404,6 +446,7 @@ export default function useLines(path, virt) {
   const startDrag = useCallback(
     (e) => {
       e.preventDefault();
+      cancelProgrammaticScroll();
       if (!trackRef.current) return;
 
       const rect = trackRef.current.getBoundingClientRect();
@@ -435,7 +478,7 @@ export default function useLines(path, virt) {
       window.addEventListener("pointerup", up);
       raf.current = requestAnimationFrame(animate);
     },
-    [animate],
+    [animate, cancelProgrammaticScroll],
   );
 
   useEffect(() => {
@@ -461,6 +504,7 @@ export default function useLines(path, virt) {
     ready,
     scrollerRef,
     startDrag,
+    cancelProgrammaticScroll,
     tick,
     trackRef,
     windowBase: base,

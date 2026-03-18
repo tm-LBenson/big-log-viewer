@@ -27,6 +27,14 @@ export default function Viewer({ virt, lines, path }) {
         }}
         {...props}
         className="virt-scroller"
+        onPointerDown={(e) => {
+          lines.cancelProgrammaticScroll?.();
+          props.onPointerDown?.(e);
+        }}
+        onWheel={(e) => {
+          lines.cancelProgrammaticScroll?.();
+          props.onWheel?.(e);
+        }}
         onScroll={(e) => {
           props.onScroll?.(e);
           if (hbarRef.current && !syncing.current) {
