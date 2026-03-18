@@ -23,6 +23,7 @@ if (-not (Get-Command winget -ErrorAction SilentlyContinue)) {
 }
 
 if (-not (Get-Command git -ErrorAction SilentlyContinue)) {
+    Write-Host "Installing Git..."
     winget install --id Git.Git -e --source winget
     Assert-LastExitCode "Installing Git"
     Refresh-Path
@@ -30,6 +31,7 @@ if (-not (Get-Command git -ErrorAction SilentlyContinue)) {
 }
 
 if (-not (Get-Command go -ErrorAction SilentlyContinue)) {
+    Write-Host "Installing Go..."
     winget install --id GoLang.Go -e --source winget
     Assert-LastExitCode "Installing Go"
     Refresh-Path
@@ -38,15 +40,16 @@ if (-not (Get-Command go -ErrorAction SilentlyContinue)) {
 
 $goModPath = Join-Path $tempPath "go.mod"
 $gitPath = Join-Path $tempPath ".git"
-
 if ((Test-Path $tempPath) -and -not ((Test-Path $goModPath) -and (Test-Path $gitPath))) {
     Remove-Item $tempPath -Recurse -Force
 }
 
 if (-not (Test-Path $tempPath)) {
+    Write-Host "Cloning repository..."
     git clone --depth 1 "$repoUrl" "$tempPath"
     Assert-LastExitCode "Cloning repository"
 } else {
+    Write-Host "Refreshing repository..."
     git -C $tempPath fetch origin
     Assert-LastExitCode "Fetching repository"
     git -C $tempPath reset --hard origin/main
@@ -55,9 +58,14 @@ if (-not (Test-Path $tempPath)) {
     Assert-LastExitCode "Cleaning repository"
 }
 
+$packageVersion = (Get-Content (Join-Path $tempPath "package.json") | ConvertFrom-Json).version
+if (-not $packageVersion) {
+    throw "Could not read version from package.json"
+}
+
 Push-Location $tempPath
 try {
-    go build -o $appName ./cmd/biglog
+    go build -ldflags "-X main.appVersion=$packageVersion" -o $appName ./cmd/biglog
     Assert-LastExitCode "Building biglog"
 }
 finally {
@@ -81,4 +89,5 @@ $metaPath = Join-Path $desktopPath "biglog-install.json"
 
 Write-Host ""
 Write-Host "Built and placed '$appName' on your Desktop."
+Write-Host "Version: $packageVersion"
 Write-Host "Run with: `"$desktopPath\$appName`" -logdir `"C:\path\to\logs`""

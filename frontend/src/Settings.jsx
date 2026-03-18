@@ -25,19 +25,26 @@ const UPDATE_BUSY_STATES = new Set([
   "preparing",
   "cloning",
   "building",
+  "closing",
   "restarting",
 ]);
 
-function shortBuildLabel(status) {
-  if (!status?.currentShort) return "Local build";
+function currentVersionLabel(status) {
+  if (!status?.currentVersion) return "Local build";
   return status.currentModified
-    ? `${status.currentShort} (modified)`
-    : status.currentShort;
+    ? `${status.currentVersion} (modified)`
+    : status.currentVersion;
 }
 
-function latestBuildLabel(status) {
-  if (!status?.latestShort) return "Not checked yet";
-  return status.latestShort;
+function latestVersionLabel(status) {
+  if (!status?.latestVersion) return "Not checked yet";
+  return status.latestVersion;
+}
+
+function installActionLabel(status) {
+  return status?.goos === "windows"
+    ? "Install update & restart"
+    : "Install update";
 }
 
 function updateHeadline(status) {
@@ -51,8 +58,12 @@ function updateHeadline(status) {
       return "Downloading the latest build…";
     case "building":
       return "Building the updated binary…";
+    case "closing":
+      return "Installing the update. Big Log will close soon.";
     case "restarting":
       return "Restarting Big Log…";
+    case "updated":
+      return "Update installed. Restart Big Log manually.";
     default:
       return "Ready to check for updates.";
   }
@@ -63,6 +74,7 @@ function statusLabel(status) {
   if (status.state === "error") return "Error";
   if (status.state === "checked" && status.updateAvailable) return "Update available";
   if (status.state === "checked" && !status.updateAvailable) return "Up to date";
+  if (status.state === "updated") return "Restart required";
   if (UPDATE_BUSY_STATES.has(status.state)) return "Working";
   return "Ready";
 }
@@ -70,8 +82,8 @@ function statusLabel(status) {
 function shouldShowInstall(status) {
   if (!status?.canApply) return false;
   if (UPDATE_BUSY_STATES.has(status.state)) return false;
-  if (!status.latestRevision) return false;
-  return status.updateAvailable || !status.currentRevision;
+  if (!status.latestVersion) return false;
+  return status.updateAvailable || !status.currentVersion;
 }
 
 async function parseResponse(response, fallbackMessage) {
@@ -167,7 +179,11 @@ export default function Settings({ open, onClose }) {
         const data = await response.json();
         setUpdateStatus(data);
         if (data.state === "restarting") {
-          setAwaitingRestart(true);
+          setAwaitingRestart(data.goos === "windows");
+          return;
+        }
+        if (data.state === "updated") {
+          setAwaitingRestart(false);
           return;
         }
         if (data.state === "error") {
@@ -246,7 +262,7 @@ export default function Settings({ open, onClose }) {
       });
       const data = await parseResponse(response, "Failed to start the update");
       setUpdateStatus(data);
-      setAwaitingRestart(true);
+      setAwaitingRestart(data?.goos === "windows");
     } catch (error) {
       setUpdateStatus((prev) => ({
         ...(prev || {}),
@@ -386,7 +402,7 @@ export default function Settings({ open, onClose }) {
                   onClick={installUpdate}
                   disabled={busyUpdating}
                 >
-                  Install update &amp; restart
+                  {installActionLabel(updateStatus)}
                 </button>
               ) : null}
             </div>
@@ -394,12 +410,12 @@ export default function Settings({ open, onClose }) {
 
           <div className="settings-update-grid">
             <div className="settings-update-row">
-              <span>Current build</span>
-              <strong>{shortBuildLabel(updateStatus)}</strong>
+              <span>Current version</span>
+              <strong>{currentVersionLabel(updateStatus)}</strong>
             </div>
             <div className="settings-update-row">
-              <span>Latest remote</span>
-              <strong>{latestBuildLabel(updateStatus)}</strong>
+              <span>Latest version</span>
+              <strong>{latestVersionLabel(updateStatus)}</strong>
             </div>
           </div>
 

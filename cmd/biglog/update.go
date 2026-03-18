@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"runtime/debug"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -19,7 +20,10 @@ import (
 
 const defaultUpdateRepo = "https://github.com/tm-LBenson/big-log-viewer.git"
 
-var updater = newUpdateManager()
+var (
+	updater    = newUpdateManager()
+	appVersion = "dev"
+)
 
 type installMetadata struct {
 	RepoURL       string `json:"repoUrl,omitempty"`
@@ -34,6 +38,8 @@ type updateStatus struct {
 	RepoURL           string `json:"repoUrl,omitempty"`
 	Executable        string `json:"executable,omitempty"`
 	GOOS              string `json:"goos,omitempty"`
+	CurrentVersion    string `json:"currentVersion,omitempty"`
+	LatestVersion     string `json:"latestVersion,omitempty"`
 	CurrentRevision   string `json:"currentRevision,omitempty"`
 	CurrentShort      string `json:"currentShort,omitempty"`
 	CurrentModified   bool   `json:"currentModified,omitempty"`
@@ -46,6 +52,11 @@ type updateStatus struct {
 	CheckedAt         string `json:"checkedAt,omitempty"`
 	InstallScript     string `json:"installScript,omitempty"`
 	InstalledAt       string `json:"installedAt,omitempty"`
+}
+
+type remoteBuildInfo struct {
+	Version  string
+	Revision string
 }
 
 type updateManager struct {
@@ -75,48 +86,49 @@ func (m *updateManager) snapshot() updateStatus {
 func (m *updateManager) reset(state, message string) updateStatus {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	latest := m.status.LatestRevision
+	latestVersion := m.status.LatestVersion
+	latestRevision := m.status.LatestRevision
 	latestShort := m.status.LatestShort
 	checkedAt := m.status.CheckedAt
 	m.status = buildBaseUpdateStatus()
 	m.status.State = state
 	m.status.Message = message
-	m.status.LatestRevision = latest
+	m.status.LatestVersion = latestVersion
+	m.status.LatestRevision = latestRevision
 	m.status.LatestShort = latestShort
 	m.status.CheckedAt = checkedAt
-	if m.status.CurrentRevision != "" && latest != "" {
-		m.status.UpdateAvailable = latest != m.status.CurrentRevision || m.status.CurrentModified
-	} else if latest != "" {
-		m.status.UpdateAvailable = true
-	}
+	m.status.UpdateAvailable = isVersionNewer(m.status.CurrentVersion, latestVersion)
 	return m.status
 }
 
-func (m *updateManager) updateLatest(rev string) updateStatus {
+func (m *updateManager) updateLatest(info remoteBuildInfo) updateStatus {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.status = buildBaseUpdateStatus()
 	m.status.State = "checked"
-	m.status.LatestRevision = rev
-	m.status.LatestShort = shortHash(rev)
+	m.status.LatestVersion = info.Version
+	m.status.LatestRevision = info.Revision
+	m.status.LatestShort = shortHash(info.Revision)
 	m.status.CheckedAt = time.Now().Format(time.RFC3339)
-	if rev == "" {
-		m.status.Message = "Could not determine the latest remote build."
+	if info.Version == "" {
+		m.status.Message = "Could not determine the latest remote version."
 		return m.status
 	}
-	switch {
-	case m.status.CurrentRevision == "":
+
+	switch versionCompare(m.status.CurrentVersion, info.Version) {
+	case -1:
 		m.status.UpdateAvailable = true
-		m.status.Message = "Current build does not expose a revision. You can still install the latest remote build."
-	case m.status.CurrentRevision == rev && !m.status.CurrentModified:
+		if m.status.CurrentVersion == "" {
+			m.status.Message = fmt.Sprintf("Update available: %s", info.Version)
+		} else {
+			m.status.Message = fmt.Sprintf("Update available: %s -> %s", m.status.CurrentVersion, info.Version)
+		}
+	case 0:
 		m.status.UpdateAvailable = false
-		m.status.Message = "You are already on the latest build."
-	case m.status.CurrentRevision == rev && m.status.CurrentModified:
-		m.status.UpdateAvailable = true
-		m.status.Message = "Your build matches the latest commit but was built from modified source."
+		m.status.Message = fmt.Sprintf("You are already on version %s.", info.Version)
 	default:
-		m.status.UpdateAvailable = true
-		m.status.Message = fmt.Sprintf("Update available: %s → %s", shortHash(m.status.CurrentRevision), shortHash(rev))
+		m.status.UpdateAvailable = false
+		m.status.Message = fmt.Sprintf("You are already ahead of the latest remote version (%s).", info.Version)
 	}
 	return m.status
 }
@@ -124,21 +136,19 @@ func (m *updateManager) updateLatest(rev string) updateStatus {
 func (m *updateManager) markError(message string, err error) updateStatus {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	latest := m.status.LatestRevision
+	latestVersion := m.status.LatestVersion
+	latestRevision := m.status.LatestRevision
 	latestShort := m.status.LatestShort
 	checkedAt := m.status.CheckedAt
 	m.status = buildBaseUpdateStatus()
 	m.status.State = "error"
 	m.status.Message = message
 	m.status.Error = strings.TrimSpace(errString(err))
-	m.status.LatestRevision = latest
+	m.status.LatestVersion = latestVersion
+	m.status.LatestRevision = latestRevision
 	m.status.LatestShort = latestShort
 	m.status.CheckedAt = checkedAt
-	if m.status.CurrentRevision != "" && latest != "" {
-		m.status.UpdateAvailable = latest != m.status.CurrentRevision || m.status.CurrentModified
-	} else if latest != "" {
-		m.status.UpdateAvailable = true
-	}
+	m.status.UpdateAvailable = isVersionNewer(m.status.CurrentVersion, latestVersion)
 	return m.status
 }
 
@@ -151,27 +161,25 @@ func (m *updateManager) beginInstall() bool {
 	m.busy = true
 	m.status = buildBaseUpdateStatus()
 	m.status.State = "preparing"
-	m.status.Message = "Preparing the update…"
+	m.status.Message = "Preparing the update..."
 	return true
 }
 
 func (m *updateManager) setProgress(state, message string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	latest := m.status.LatestRevision
+	latestVersion := m.status.LatestVersion
+	latestRevision := m.status.LatestRevision
 	latestShort := m.status.LatestShort
 	checkedAt := m.status.CheckedAt
 	m.status = buildBaseUpdateStatus()
 	m.status.State = state
 	m.status.Message = message
-	m.status.LatestRevision = latest
+	m.status.LatestVersion = latestVersion
+	m.status.LatestRevision = latestRevision
 	m.status.LatestShort = latestShort
 	m.status.CheckedAt = checkedAt
-	if latest != "" && m.status.CurrentRevision != "" {
-		m.status.UpdateAvailable = latest != m.status.CurrentRevision || m.status.CurrentModified
-	} else if latest != "" {
-		m.status.UpdateAvailable = true
-	}
+	m.status.UpdateAvailable = isVersionNewer(m.status.CurrentVersion, latestVersion)
 }
 
 func (m *updateManager) finishError(message string, err error) {
@@ -181,19 +189,21 @@ func (m *updateManager) finishError(message string, err error) {
 	m.mu.Unlock()
 }
 
-func (m *updateManager) finishSuccess(message string) {
+func (m *updateManager) finishSuccess(state, message string, latestVersion string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	latest := m.status.LatestRevision
+	latestRevision := m.status.LatestRevision
 	latestShort := m.status.LatestShort
 	checkedAt := m.status.CheckedAt
 	m.status = buildBaseUpdateStatus()
-	m.status.State = "restarting"
+	m.status.State = state
 	m.status.Message = message
-	m.status.LatestRevision = latest
+	m.status.LatestVersion = strings.TrimSpace(latestVersion)
+	m.status.LatestRevision = latestRevision
 	m.status.LatestShort = latestShort
 	m.status.CheckedAt = checkedAt
 	m.status.UpdateAvailable = false
+	m.busy = false
 }
 
 func buildBaseUpdateStatus() updateStatus {
@@ -214,6 +224,7 @@ func buildBaseUpdateStatus() updateStatus {
 		RepoURL:         repoURL,
 		Executable:      exe,
 		GOOS:            runtime.GOOS,
+		CurrentVersion:  currentVersion(),
 		CurrentRevision: currentRev,
 		CurrentShort:    shortHash(currentRev),
 		CurrentModified: currentModified,
@@ -241,6 +252,121 @@ func currentRevisionInfo() (string, bool) {
 		}
 	}
 	return rev, modified
+}
+
+func currentVersion() string {
+	v := normalizeVersion(appVersion)
+	if v != "" && !strings.EqualFold(v, "dev") {
+		return v
+	}
+	if cwd, err := os.Getwd(); err == nil {
+		if version, err := readVersionFromPackageJSON(filepath.Join(cwd, "package.json")); err == nil && version != "" {
+			return version
+		}
+	}
+	if exe, err := os.Executable(); err == nil {
+		dir := filepath.Dir(filepath.Clean(exe))
+		if version, err := readVersionFromPackageJSON(filepath.Join(dir, "package.json")); err == nil && version != "" {
+			return version
+		}
+	}
+	if strings.EqualFold(strings.TrimSpace(appVersion), "dev") {
+		return ""
+	}
+	return normalizeVersion(appVersion)
+}
+
+func normalizeVersion(v string) string {
+	v = strings.TrimSpace(v)
+	v = strings.TrimPrefix(strings.ToLower(v), "v")
+	return v
+}
+
+func parseVersion(v string) ([]int, bool) {
+	v = normalizeVersion(v)
+	if v == "" {
+		return nil, false
+	}
+	parts := strings.Split(v, ".")
+	out := make([]int, 0, len(parts))
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			out = append(out, 0)
+			continue
+		}
+		for i, r := range part {
+			if r < '0' || r > '9' {
+				if i == 0 {
+					return nil, false
+				}
+				part = part[:i]
+				break
+			}
+		}
+		value, err := strconv.Atoi(part)
+		if err != nil {
+			return nil, false
+		}
+		out = append(out, value)
+	}
+	for len(out) > 0 && out[len(out)-1] == 0 {
+		out = out[:len(out)-1]
+	}
+	if len(out) == 0 {
+		return []int{0}, true
+	}
+	return out, true
+}
+
+func versionCompare(current, latest string) int {
+	current = normalizeVersion(current)
+	latest = normalizeVersion(latest)
+	if current == latest {
+		return 0
+	}
+	currentParts, currentOK := parseVersion(current)
+	latestParts, latestOK := parseVersion(latest)
+	if currentOK && latestOK {
+		maxLen := len(currentParts)
+		if len(latestParts) > maxLen {
+			maxLen = len(latestParts)
+		}
+		for i := 0; i < maxLen; i++ {
+			cv := 0
+			lv := 0
+			if i < len(currentParts) {
+				cv = currentParts[i]
+			}
+			if i < len(latestParts) {
+				lv = latestParts[i]
+			}
+			if cv < lv {
+				return -1
+			}
+			if cv > lv {
+				return 1
+			}
+		}
+		return 0
+	}
+	if current == "" && latest != "" {
+		return -1
+	}
+	if current != "" && latest == "" {
+		return 1
+	}
+	if current < latest {
+		return -1
+	}
+	if current > latest {
+		return 1
+	}
+	return 0
+}
+
+func isVersionNewer(current, latest string) bool {
+	return versionCompare(current, latest) < 0
 }
 
 func shortHash(rev string) string {
@@ -346,23 +472,53 @@ func wrapCmdError(prefix string, err error, out []byte) error {
 	return fmt.Errorf("%s: %w\n%s", prefix, err, trimmed)
 }
 
-func latestRemoteRevision(ctx context.Context, repoURL string) (string, error) {
+func readVersionFromPackageJSON(path string) (string, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return "", err
+	}
+	var payload struct {
+		Version string `json:"version"`
+	}
+	if err := json.Unmarshal(data, &payload); err != nil {
+		return "", err
+	}
+	return normalizeVersion(payload.Version), nil
+}
+
+func repoHeadRevision(repoDir string) string {
 	gitPath, err := exec.LookPath("git")
 	if err != nil {
-		return "", errors.New("git was not found on PATH")
+		return ""
 	}
-	cmd := exec.CommandContext(ctx, gitPath, "ls-remote", "--quiet", repoURL, "HEAD")
-	var out bytes.Buffer
-	cmd.Stdout = &out
-	cmd.Stderr = &out
-	if err := cmd.Run(); err != nil {
-		return "", wrapCmdError("failed to query the remote repository", err, out.Bytes())
+	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, gitPath, "-C", repoDir, "rev-parse", "HEAD")
+	out, err := cmd.Output()
+	if err != nil {
+		return ""
 	}
-	fields := strings.Fields(out.String())
-	if len(fields) == 0 {
-		return "", errors.New("remote repository did not return a revision")
+	return strings.TrimSpace(string(out))
+}
+
+func latestRemoteBuildInfo(ctx context.Context, repoURL string) (remoteBuildInfo, error) {
+	tmpDir, err := os.MkdirTemp("", "biglog-check-*")
+	if err != nil {
+		return remoteBuildInfo{}, err
 	}
-	return strings.TrimSpace(fields[0]), nil
+	defer os.RemoveAll(tmpDir)
+	repoDir := filepath.Join(tmpDir, "repo")
+	if err := cloneLatestRepo(ctx, repoURL, repoDir); err != nil {
+		return remoteBuildInfo{}, err
+	}
+	version, err := readVersionFromPackageJSON(filepath.Join(repoDir, "package.json"))
+	if err != nil {
+		return remoteBuildInfo{}, fmt.Errorf("failed to read the remote package version: %w", err)
+	}
+	return remoteBuildInfo{
+		Version:  version,
+		Revision: repoHeadRevision(repoDir),
+	}, nil
 }
 
 func updateStatusHandler(w http.ResponseWriter, r *http.Request) {
@@ -378,7 +534,7 @@ func updateCheckHandler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "GET or POST only", http.StatusMethodNotAllowed)
 		return
 	}
-	base := updater.reset("checking", "Checking for updates…")
+	base := updater.reset("checking", "Checking for updates...")
 	if !base.CanCheck {
 		reason := base.UnsupportedReason
 		if strings.TrimSpace(reason) == "" {
@@ -387,14 +543,14 @@ func updateCheckHandler(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, updater.markError("Unable to check for updates.", errors.New(reason)))
 		return
 	}
-	ctx, cancel := context.WithTimeout(r.Context(), 12*time.Second)
+	ctx, cancel := context.WithTimeout(r.Context(), 2*time.Minute)
 	defer cancel()
-	rev, err := latestRemoteRevision(ctx, base.RepoURL)
+	info, err := latestRemoteBuildInfo(ctx, base.RepoURL)
 	if err != nil {
 		writeJSON(w, updater.markError("Failed to check for updates.", err))
 		return
 	}
-	writeJSON(w, updater.updateLatest(rev))
+	writeJSON(w, updater.updateLatest(info))
 }
 
 func updateApplyHandler(w http.ResponseWriter, r *http.Request) {
@@ -420,11 +576,7 @@ func updateApplyHandler(w http.ResponseWriter, r *http.Request) {
 func performSelfUpdate(base updateStatus) {
 	repoURL := base.RepoURL
 	exe := base.Executable
-	workDir, _ := os.Getwd()
-	if workDir == "" {
-		workDir = filepath.Dir(exe)
-	}
-	updater.setProgress("cloning", "Downloading the latest source…")
+	updater.setProgress("cloning", "Downloading the latest source...")
 
 	tmpDir, err := os.MkdirTemp("", "biglog-update-*")
 	if err != nil {
@@ -433,38 +585,65 @@ func performSelfUpdate(base updateStatus) {
 	}
 
 	repoDir := filepath.Join(tmpDir, "repo")
-	if err := cloneLatestRepo(repoURL, repoDir); err != nil {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	if err := cloneLatestRepo(ctx, repoURL, repoDir); err != nil {
+		cancel()
 		updater.finishError("Failed to download the latest build.", err)
 		return
 	}
+	cancel()
 
-	updater.setProgress("building", "Building the updated binary…")
+	remoteVersion, err := readVersionFromPackageJSON(filepath.Join(repoDir, "package.json"))
+	if err != nil {
+		updater.finishError("Failed to read the remote version.", err)
+		return
+	}
+	if !isVersionNewer(base.CurrentVersion, remoteVersion) {
+		updater.finishError("No update is available.", fmt.Errorf("current version %s is already up to date with remote version %s", emptyVersionLabel(base.CurrentVersion), emptyVersionLabel(remoteVersion)))
+		return
+	}
+
+	updater.setProgress("building", fmt.Sprintf("Building version %s...", remoteVersion))
 	newExe := filepath.Join(tmpDir, filepath.Base(exe))
 	if err := buildUpdatedBinary(repoDir, newExe); err != nil {
 		updater.finishError("Failed to build the updated binary.", err)
 		return
 	}
 
-	updater.setProgress("restarting", "Restarting Big Log with the updated build…")
-	if err := launchReplacementHelper(exe, newExe, workDir); err != nil {
-		updater.finishError("Failed to restart into the updated build.", err)
+	if runtime.GOOS == "windows" {
+		updater.setProgress("restarting", fmt.Sprintf("Installing version %s and restarting Big Log...", remoteVersion))
+	} else {
+		updater.setProgress("closing", fmt.Sprintf("Installing version %s. Big Log will close. Restart it after the terminal message appears.", remoteVersion))
+	}
+	if err := launchReplacementHelper(exe, newExe, remoteVersion); err != nil {
+		updater.finishError("Failed to apply the updated build.", err)
 		return
 	}
 
-	updater.finishSuccess("Restarting Big Log with the updated build…")
+	if runtime.GOOS == "windows" {
+		updater.finishSuccess("restarting", fmt.Sprintf("Installing version %s and restarting Big Log...", remoteVersion), remoteVersion)
+	} else {
+		updater.finishSuccess("updated", fmt.Sprintf("Version %s is ready. Restart Big Log after the terminal message appears.", remoteVersion), remoteVersion)
+	}
 	go func() {
-		time.Sleep(800 * time.Millisecond)
+		time.Sleep(900 * time.Millisecond)
 		os.Exit(0)
 	}()
 }
 
-func cloneLatestRepo(repoURL, repoDir string) error {
+func emptyVersionLabel(v string) string {
+	v = strings.TrimSpace(v)
+	if v == "" {
+		return "(unknown)"
+	}
+	return v
+}
+
+func cloneLatestRepo(ctx context.Context, repoURL, repoDir string) error {
 	gitPath, err := exec.LookPath("git")
 	if err != nil {
 		return errors.New("git was not found on PATH")
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
-	defer cancel()
 	cmd := exec.CommandContext(ctx, gitPath, "clone", "--depth", "1", repoURL, repoDir)
 	var out bytes.Buffer
 	cmd.Stdout = &out
@@ -480,9 +659,18 @@ func buildUpdatedBinary(repoDir, outputPath string) error {
 	if err != nil {
 		return errors.New("go was not found on PATH")
 	}
+	version, err := readVersionFromPackageJSON(filepath.Join(repoDir, "package.json"))
+	if err != nil {
+		return fmt.Errorf("failed to read package.json version: %w", err)
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 6*time.Minute)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, goPath, "build", "-o", outputPath, "./cmd/biglog")
+	cmd := exec.CommandContext(ctx, goPath,
+		"build",
+		"-ldflags", fmt.Sprintf("-X main.appVersion=%s", version),
+		"-o", outputPath,
+		"./cmd/biglog",
+	)
 	cmd.Dir = repoDir
 	cmd.Env = append(os.Environ(), "CGO_ENABLED=0")
 	var out bytes.Buffer
@@ -499,70 +687,45 @@ func buildUpdatedBinary(repoDir, outputPath string) error {
 	return nil
 }
 
-func launchReplacementHelper(currentExe, newExe, workingDir string) error {
-	tempDir := filepath.Dir(newExe)
-	argsFile, err := writeArgsFile(tempDir, os.Args[1:])
-	if err != nil {
-		return err
-	}
+func launchReplacementHelper(currentExe, newExe, version string) error {
 	if runtime.GOOS == "windows" {
-		return launchWindowsUpdater(currentExe, newExe, argsFile, workingDir)
+		return launchWindowsUpdater(currentExe, newExe)
 	}
-	return launchUnixUpdater(currentExe, newExe, argsFile, workingDir)
+	return launchUnixUpdater(currentExe, newExe, version)
 }
 
-func writeArgsFile(dir string, args []string) (string, error) {
-	path := filepath.Join(dir, "biglog-args.txt")
-	if err := os.WriteFile(path, []byte(strings.Join(args, "\n")), 0o600); err != nil {
-		return "", err
-	}
-	return path, nil
-}
-
-func launchUnixUpdater(currentExe, newExe, argsFile, workingDir string) error {
+func launchUnixUpdater(currentExe, newExe, version string) error {
 	scriptPath := filepath.Join(filepath.Dir(newExe), "apply-update.sh")
 	script := `#!/usr/bin/env bash
 set -euo pipefail
 PID_TO_WAIT="$1"
 CURRENT_EXE="$2"
 NEW_EXE="$3"
-ARGS_FILE="$4"
-WORKING_DIR="$5"
+TARGET_VERSION="$4"
 while kill -0 "$PID_TO_WAIT" 2>/dev/null; do
   sleep 0.2
 done
 chmod +x "$NEW_EXE"
 mv -f "$NEW_EXE" "$CURRENT_EXE"
-ARGS=()
-if [[ -f "$ARGS_FILE" ]]; then
-  while IFS= read -r line || [[ -n "$line" ]]; do
-    ARGS+=("$line")
-  done < "$ARGS_FILE"
-fi
-if [[ -d "$WORKING_DIR" ]]; then
-  cd "$WORKING_DIR" || true
-fi
-nohup "$CURRENT_EXE" "${ARGS[@]}" >/dev/null 2>&1 &
-rm -f "$ARGS_FILE" "$0"
+printf '\nBig Log updated to version %s. Restart the app manually.\n' "$TARGET_VERSION"
+rm -f "$0"
 `
 	if err := os.WriteFile(scriptPath, []byte(script), 0o755); err != nil {
 		return err
 	}
-	cmd := exec.Command("bash", scriptPath, fmt.Sprint(os.Getpid()), currentExe, newExe, argsFile, workingDir)
+	cmd := exec.Command("bash", scriptPath, fmt.Sprint(os.Getpid()), currentExe, newExe, version)
 	if err := cmd.Start(); err != nil {
 		return err
 	}
 	return nil
 }
 
-func launchWindowsUpdater(currentExe, newExe, argsFile, workingDir string) error {
+func launchWindowsUpdater(currentExe, newExe string) error {
 	scriptPath := filepath.Join(filepath.Dir(newExe), "apply-update.ps1")
 	script := `param(
   [Parameter(Mandatory=$true)][int]$PidToWait,
   [Parameter(Mandatory=$true)][string]$CurrentExe,
-  [Parameter(Mandatory=$true)][string]$NewExe,
-  [Parameter(Mandatory=$true)][string]$ArgsFile,
-  [Parameter(Mandatory=$true)][string]$WorkingDir
+  [Parameter(Mandatory=$true)][string]$NewExe
 )
 $ErrorActionPreference = "Stop"
 while (Get-Process -Id $PidToWait -ErrorAction SilentlyContinue) {
@@ -572,12 +735,7 @@ if (Test-Path -LiteralPath $CurrentExe) {
   Remove-Item -LiteralPath $CurrentExe -Force
 }
 Move-Item -LiteralPath $NewExe -Destination $CurrentExe -Force
-$argsList = @()
-if (Test-Path -LiteralPath $ArgsFile) {
-  $argsList = Get-Content -LiteralPath $ArgsFile
-}
-Start-Process -FilePath $CurrentExe -WorkingDirectory $WorkingDir -ArgumentList $argsList
-Remove-Item -LiteralPath $ArgsFile -Force -ErrorAction SilentlyContinue
+Start-Process -FilePath $CurrentExe -WorkingDirectory (Split-Path -Parent $CurrentExe)
 Remove-Item -LiteralPath $MyInvocation.MyCommand.Path -Force -ErrorAction SilentlyContinue
 `
 	if err := os.WriteFile(scriptPath, []byte(script), 0o600); err != nil {
@@ -598,8 +756,6 @@ Remove-Item -LiteralPath $MyInvocation.MyCommand.Path -Force -ErrorAction Silent
 		"-PidToWait", fmt.Sprint(os.Getpid()),
 		"-CurrentExe", currentExe,
 		"-NewExe", newExe,
-		"-ArgsFile", argsFile,
-		"-WorkingDir", workingDir,
 	)
 	if err := cmd.Start(); err != nil {
 		return err
