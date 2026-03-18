@@ -193,7 +193,7 @@ function IssuesPanel({ failureBreakdown, issueSamples, warnCount, errorCount }) 
 
 function LogOutput({ lines }) {
   if (!lines.length) {
-    return <div className="idhub-dash__empty">No non-JSON lines were found in this log.</div>;
+    return <div className="idhub-dash__empty">No remaining log lines were found after parsed JSON sections were removed.</div>;
   }
   return (
     <div className="idhub-dash__logfeed">
@@ -353,7 +353,7 @@ export default function IdHubDashboard({ path }) {
 
         <Card
           title="Log output"
-          subtitle="All non-JSON lines from the job log."
+          subtitle="Remaining log lines after parsed JSON sections are removed."
           className="idhub-dash__card--span"
         >
           <LogOutput lines={parsed.logLines} />

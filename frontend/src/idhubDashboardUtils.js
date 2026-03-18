@@ -82,15 +82,15 @@ function lineNumberAt(text, idx) {
   return (text.slice(0, idx).match(/\n/g) || []).length + 1;
 }
 
-function buildBlock(text, seg, kind) {
-  const startLine = lineNumberAt(text, seg.startIdx);
-  const endLine = startLine + (text.slice(seg.startIdx, seg.endIdx).match(/\n/g) || []).length;
+function buildBlock(text, seg, kind, lineStartIdx = seg.startIdx) {
+  const startLine = lineNumberAt(text, lineStartIdx);
+  const endLine = startLine + (text.slice(lineStartIdx, seg.endIdx).match(/\n/g) || []).length;
   return { ...seg, startLine, endLine, kind };
 }
 
 function findResourceBlocks(text) {
   const blocks = [];
-  const re = /resources\.json\s*:/gi;
+  const re = /^.*resources\.json(?:[^\n{]*)?:\s*$/gim;
   let match;
   while ((match = re.exec(text))) {
     const firstBrace = text.indexOf("{", match.index + match[0].length);
@@ -98,7 +98,10 @@ function findResourceBlocks(text) {
     const seg = parseJsonAt(text, firstBrace);
     if (!seg) continue;
     try {
-      blocks.push({ ...buildBlock(text, seg, "resource"), data: JSON.parse(seg.raw) });
+      blocks.push({
+        ...buildBlock(text, seg, "resource", match.index),
+        data: JSON.parse(seg.raw),
+      });
     } catch {
       // ignore malformed blocks
     }
@@ -114,8 +117,9 @@ function findBatchSummaryBlocks(text) {
   while ((match = re.exec(text))) {
     const seg = parseJsonAt(text, match.index + match[0].length - 1);
     if (!seg) continue;
+    const lineStartIdx = text.lastIndexOf("\n", match.index) + 1;
     try {
-      blocks.push({ ...buildBlock(text, seg, "summary"), data: JSON.parse(seg.raw) });
+      blocks.push({ ...buildBlock(text, seg, "summary", lineStartIdx), data: JSON.parse(seg.raw) });
     } catch {
       // ignore malformed blocks
     }
