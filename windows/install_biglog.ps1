@@ -11,46 +11,66 @@ function Refresh-Path {
                 [System.Environment]::GetEnvironmentVariable("Path", "User")
 }
 
+function Assert-LastExitCode {
+    param([string]$Step)
+    if ($LASTEXITCODE -ne 0) {
+        throw "$Step failed with exit code $LASTEXITCODE"
+    }
+}
+
 if (-not (Get-Command winget -ErrorAction SilentlyContinue)) {
-    Write-Error "winget is required but not found. Please install Windows 10 1809+ or use the Microsoft Store version of 'App Installer'."
-    exit 1
+    throw "winget is required but not found. Please install App Installer first."
 }
 
 if (-not (Get-Command git -ErrorAction SilentlyContinue)) {
-    Write-Host "Installing Git..."
     winget install --id Git.Git -e --source winget
+    Assert-LastExitCode "Installing Git"
     Refresh-Path
     Start-Sleep -Seconds 3
 }
 
 if (-not (Get-Command go -ErrorAction SilentlyContinue)) {
-    Write-Host "Installing Go..."
     winget install --id GoLang.Go -e --source winget
+    Assert-LastExitCode "Installing Go"
     Refresh-Path
     Start-Sleep -Seconds 3
 }
 
+$goModPath = Join-Path $tempPath "go.mod"
+$gitPath = Join-Path $tempPath ".git"
+
+if ((Test-Path $tempPath) -and -not ((Test-Path $goModPath) -and (Test-Path $gitPath))) {
+    Remove-Item $tempPath -Recurse -Force
+}
+
 if (-not (Test-Path $tempPath)) {
-    Write-Host "Cloning repository..."
-    try {
-        git clone --depth 1 "$repoUrl" "$tempPath"
-    }
-    catch {
-        Write-Warning "First git clone attempt failed. Retrying in 5 seconds..."
-        Start-Sleep -Seconds 5
-        git clone --depth 1 "$repoUrl" "$tempPath"
-    }
+    git clone --depth 1 "$repoUrl" "$tempPath"
+    Assert-LastExitCode "Cloning repository"
 } else {
-    Write-Host "Repo already cloned at $tempPath, skipping clone."
+    git -C $tempPath fetch origin
+    Assert-LastExitCode "Fetching repository"
+    git -C $tempPath reset --hard origin/main
+    Assert-LastExitCode "Resetting repository"
+    git -C $tempPath clean -fd
+    Assert-LastExitCode "Cleaning repository"
 }
 
 Push-Location $tempPath
-go build -o $appName ./cmd/biglog
-Pop-Location
+try {
+    go build -o $appName ./cmd/biglog
+    Assert-LastExitCode "Building biglog"
+}
+finally {
+    Pop-Location
+}
+
+$builtExe = Join-Path $tempPath $appName
+if (-not (Test-Path $builtExe)) {
+    throw "Build completed without producing $builtExe"
+}
 
 $targetExe = Join-Path $desktopPath $appName
-Move-Item -Path (Join-Path $tempPath $appName) `
-          -Destination $targetExe -Force
+Move-Item -Path $builtExe -Destination $targetExe -Force
 
 $metaPath = Join-Path $desktopPath "biglog-install.json"
 @{
@@ -59,5 +79,6 @@ $metaPath = Join-Path $desktopPath "biglog-install.json"
     installedAt   = (Get-Date).ToUniversalTime().ToString("o")
 } | ConvertTo-Json | Set-Content -Path $metaPath -Encoding UTF8
 
-Write-Host "`n Built and placed '$appName' on your Desktop."
-Write-Host "   Run with: `"$desktopPath\$appName`" -logdir `"C:\path\to\logs`""
+Write-Host ""
+Write-Host "Built and placed '$appName' on your Desktop."
+Write-Host "Run with: `"$desktopPath\$appName`" -logdir `"C:\path\to\logs`""
