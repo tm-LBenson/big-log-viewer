@@ -1,8 +1,10 @@
 import { useState, useRef, useEffect, useCallback, useLayoutEffect } from "react";
 import { PAGE, WINDOW_MAX, HALF_WIN, ROW, HANDLE, SPEED } from "./constants";
 
-const TOP_REBASE_TRIGGER = 1;
-const BOTTOM_REBASE_TRIGGER = HALF_WIN;
+const TOP_REBASE_TRIGGER_RATIO = 0.2;
+const TOP_REBASE_TARGET_RATIO = 0.65;
+const BOTTOM_REBASE_TRIGGER_RATIO = 0.8;
+const BOTTOM_REBASE_TARGET_RATIO = 0.35;
 const JUMP_RELEASE_DELAY = 220;
 const NON_EDGE_MIN_FRAMES = 1;
 const NON_EDGE_MAX_FRAMES = 20;
@@ -59,6 +61,8 @@ export default function useLines(path, virt) {
   const scrollRequestId = useRef(0);
   const programmaticJump = useRef(null);
   const lastRange = useRef(null);
+  const manualDirection = useRef(0);
+  const directionResetTimer = useRef(0);
 
   const clampLine = useCallback(
     (line) => Math.max(0, Math.min(Math.max(0, lineCount - 1), line)),
@@ -112,6 +116,34 @@ export default function useLines(path, virt) {
     programmaticJump.current = null;
     scrollRequestId.current += 1;
   }, []);
+
+  const clearDirectionResetTimer = useCallback(() => {
+    if (directionResetTimer.current) {
+      window.clearTimeout(directionResetTimer.current);
+      directionResetTimer.current = 0;
+    }
+  }, []);
+
+  const setManualDirection = useCallback((direction, options = {}) => {
+    const nextDirection = Math.sign(direction || 0);
+    manualDirection.current = nextDirection;
+
+    const { sticky = false, resetAfter = 140 } = options;
+    clearDirectionResetTimer();
+
+    if (sticky || nextDirection === 0) {
+      return;
+    }
+
+    directionResetTimer.current = window.setTimeout(() => {
+      manualDirection.current = 0;
+      directionResetTimer.current = 0;
+    }, resetAfter);
+  }, [clearDirectionResetTimer]);
+
+  const noteWheel = useCallback((deltaY) => {
+    setManualDirection(deltaY, { resetAfter: 220 });
+  }, [setManualDirection]);
 
   const releaseProgrammaticJump = useCallback((requestId) => {
     if (programmaticJump.current?.id === requestId) {
@@ -415,14 +447,20 @@ export default function useLines(path, virt) {
       }
 
       const remainingBelow = lineCount - (base + windowCount);
-      if (startIndex >= BOTTOM_REBASE_TRIGGER && remainingBelow > 0) {
-        const shift = Math.min(HALF_WIN, remainingBelow);
+      const topTrigger = Math.max(1, Math.floor(windowCount * TOP_REBASE_TRIGGER_RATIO));
+      const topTarget = Math.max(0, Math.min(windowCount - 1, Math.floor(windowCount * TOP_REBASE_TARGET_RATIO)));
+      const bottomTrigger = Math.max(topTrigger + 1, Math.floor(windowCount * BOTTOM_REBASE_TRIGGER_RATIO));
+      const bottomTarget = Math.max(0, Math.min(windowCount - 1, Math.floor(windowCount * BOTTOM_REBASE_TARGET_RATIO)));
+      const direction = manualDirection.current;
+
+      if (startIndex >= bottomTrigger && remainingBelow > 0 && direction >= 0) {
+        const shift = Math.min(remainingBelow, Math.max(1, startIndex - bottomTarget));
         syncWindow(base + shift, startIndex - shift, "start", { lock: true });
         return;
       }
 
-      if (startIndex <= TOP_REBASE_TRIGGER && base > 0) {
-        const shift = Math.min(HALF_WIN, base);
+      if (startIndex <= topTrigger && base > 0 && direction <= 0) {
+        const shift = Math.min(base, Math.max(1, topTarget - startIndex));
         syncWindow(base - shift, startIndex + shift, "start", { lock: true });
       }
     },
@@ -437,10 +475,13 @@ export default function useLines(path, virt) {
 
       const range = Math.max(1, dragRange.current);
       const rows = (drag.current / range) * SPEED * dt;
-      if (rows) virt.current?.scrollBy({ top: rows * ROW });
+      if (rows) {
+        setManualDirection(rows, { sticky: true });
+        virt.current?.scrollBy({ top: rows * ROW });
+      }
       raf.current = requestAnimationFrame(animate);
     },
-    [virt],
+    [setManualDirection, virt],
   );
 
   const startDrag = useCallback(
@@ -458,6 +499,7 @@ export default function useLines(path, virt) {
       const move = (ev) => {
         const delta = Math.max(-range, Math.min(range, ev.clientY - mid));
         drag.current = delta;
+        setManualDirection(delta, { sticky: true });
         trackRef.current.firstChild.style.top = `calc(50% + ${delta}px - ${
           HANDLE / 2
         }px)`;
@@ -465,6 +507,7 @@ export default function useLines(path, virt) {
 
       const up = () => {
         drag.current = 0;
+        setManualDirection(0);
         if (trackRef.current) {
           trackRef.current.firstChild.style.top = `calc(50% - ${HANDLE / 2}px)`;
         }
@@ -478,7 +521,7 @@ export default function useLines(path, virt) {
       window.addEventListener("pointerup", up);
       raf.current = requestAnimationFrame(animate);
     },
-    [animate, cancelProgrammaticScroll],
+    [animate, cancelProgrammaticScroll, setManualDirection],
   );
 
   useEffect(() => {
@@ -487,8 +530,9 @@ export default function useLines(path, virt) {
       if (openCtrl.current) openCtrl.current.abort();
       pageCtrls.current.forEach((ctrl) => ctrl.abort());
       pageCtrls.current.clear();
+      clearDirectionResetTimer();
     };
-  }, []);
+  }, [clearDirectionResetTimer]);
 
   return {
     abs,
@@ -505,6 +549,7 @@ export default function useLines(path, virt) {
     scrollerRef,
     startDrag,
     cancelProgrammaticScroll,
+    noteWheel,
     tick,
     trackRef,
     windowBase: base,

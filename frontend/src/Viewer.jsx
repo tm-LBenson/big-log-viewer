@@ -32,6 +32,7 @@ export default function Viewer({ virt, lines, path }) {
           props.onPointerDown?.(e);
         }}
         onWheel={(e) => {
+          lines.noteWheel?.(e.deltaY);
           lines.cancelProgrammaticScroll?.();
           props.onWheel?.(e);
         }}
