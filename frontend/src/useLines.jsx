@@ -63,6 +63,10 @@ export default function useLines(path, virt) {
   const lastRange = useRef(null);
   const manualDirection = useRef(0);
   const directionResetTimer = useRef(0);
+  const joystickActive = useRef(false);
+  const joystickTopAbs = useRef(0);
+  const baseRef = useRef(0);
+  const windowCountRef = useRef(WINDOW_MAX);
 
   const clampLine = useCallback(
     (line) => Math.max(0, Math.min(Math.max(0, lineCount - 1), line)),
@@ -73,6 +77,11 @@ export default function useLines(path, virt) {
     (nextBase) => Math.max(0, Math.min(WINDOW_MAX, lineCount - nextBase)),
     [lineCount],
   );
+
+  useEffect(() => {
+    baseRef.current = base;
+    windowCountRef.current = windowCount;
+  }, [base, windowCount]);
 
   const clampBase = useCallback(
     (nextBase) => {
@@ -145,6 +154,25 @@ export default function useLines(path, virt) {
     setManualDirection(deltaY, { resetAfter: 220 });
   }, [setManualDirection]);
 
+  const getVisibleRowCount = useCallback(() => {
+    const range = lastRange.current;
+    if (range) {
+      return Math.max(1, range.endIndex - range.startIndex + 1);
+    }
+    const scroller = scrollerRef.current;
+    if (scroller) {
+      return Math.max(1, Math.ceil(scroller.clientHeight / ROW));
+    }
+    return Math.max(1, Math.ceil(window.innerHeight / ROW));
+  }, []);
+
+  const getVisibleTopAbs = useCallback(() => {
+    const range = lastRange.current;
+    if (range) return range.base + range.startIndex;
+    return baseRef.current;
+  }, []);
+
+
   const releaseProgrammaticJump = useCallback((requestId) => {
     if (programmaticJump.current?.id === requestId) {
       programmaticJump.current = null;
@@ -182,6 +210,36 @@ export default function useLines(path, virt) {
       requestScroll(Math.max(0, Math.min(maxIndex, index)), align, options);
     },
     [calcWindowCount, clampBase, requestScroll],
+  );
+
+  const scrollToAbsoluteTop = useCallback(
+    (targetTop) => {
+      if (!lineCount) return;
+
+      const visibleRows = getVisibleRowCount();
+      const maxTop = Math.max(0, lineCount - visibleRows);
+      const nextTop = Math.max(0, Math.min(maxTop, Math.round(targetTop)));
+      const currentBase = baseRef.current;
+      const currentCount = Math.max(1, windowCountRef.current);
+      const targetIndex = nextTop - currentBase;
+      const minBuffer = Math.max(8, Math.floor(currentCount * 0.18));
+      const maxBuffer = Math.max(minBuffer + 1, currentCount - visibleRows - Math.max(8, Math.floor(currentCount * 0.22)));
+
+      if (targetIndex >= minBuffer && targetIndex <= maxBuffer) {
+        virt.current?.scrollToIndex({
+          index: Math.max(0, Math.min(currentCount - 1, targetIndex)),
+          align: "start",
+          behavior: "auto",
+        });
+        return;
+      }
+
+      const idealIndex = Math.max(0, Math.min(currentCount - 1, Math.floor(currentCount * 0.42)));
+      const nextBase = clampBase(nextTop - idealIndex);
+      const nextIndex = Math.max(0, nextTop - nextBase);
+      syncWindow(nextBase, nextIndex, "start", { lock: true });
+    },
+    [clampBase, getVisibleRowCount, lineCount, syncWindow, virt],
   );
 
   useLayoutEffect(() => {
@@ -302,6 +360,11 @@ export default function useLines(path, virt) {
     pendingScroll.current = null;
     programmaticJump.current = null;
     lastRange.current = null;
+
+    joystickActive.current = false;
+    joystickTopAbs.current = 0;
+    baseRef.current = 0;
+    windowCountRef.current = WINDOW_MAX;
 
     setReady(false);
     setError("");
@@ -442,7 +505,11 @@ export default function useLines(path, virt) {
       ensure(base + startIndex, base + endIndex);
       lastRange.current = { base, startIndex, endIndex };
 
-      if (programmaticJump.current) {
+      if (!joystickActive.current) {
+        joystickTopAbs.current = base + startIndex;
+      }
+
+      if (joystickActive.current || programmaticJump.current) {
         return;
       }
 
@@ -476,18 +543,23 @@ export default function useLines(path, virt) {
       const range = Math.max(1, dragRange.current);
       const rows = (drag.current / range) * SPEED * dt;
       if (rows) {
+        joystickActive.current = true;
         setManualDirection(rows, { sticky: true });
-        virt.current?.scrollBy({ top: rows * ROW });
+        joystickTopAbs.current = getVisibleTopAbs();
+        joystickTopAbs.current += rows;
+        scrollToAbsoluteTop(joystickTopAbs.current);
       }
       raf.current = requestAnimationFrame(animate);
     },
-    [setManualDirection, virt],
+    [getVisibleTopAbs, scrollToAbsoluteTop, setManualDirection],
   );
 
   const startDrag = useCallback(
     (e) => {
       e.preventDefault();
       cancelProgrammaticScroll();
+      joystickActive.current = true;
+      joystickTopAbs.current = getVisibleTopAbs();
       if (!trackRef.current) return;
 
       const rect = trackRef.current.getBoundingClientRect();
@@ -507,6 +579,8 @@ export default function useLines(path, virt) {
 
       const up = () => {
         drag.current = 0;
+        joystickActive.current = false;
+        joystickTopAbs.current = getVisibleTopAbs();
         setManualDirection(0);
         if (trackRef.current) {
           trackRef.current.firstChild.style.top = `calc(50% - ${HANDLE / 2}px)`;
