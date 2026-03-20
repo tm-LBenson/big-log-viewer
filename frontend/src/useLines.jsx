@@ -1,11 +1,8 @@
 import { useState, useRef, useEffect, useCallback, useLayoutEffect } from "react";
-import { flushSync } from "react-dom";
 import { PAGE, WINDOW_MAX, HALF_WIN, ROW, HANDLE, SPEED } from "./constants";
 
-const TOP_REBASE_TRIGGER_RATIO = 0.2;
-const TOP_REBASE_TARGET_RATIO = 0.65;
-const BOTTOM_REBASE_TRIGGER_RATIO = 0.8;
-const BOTTOM_REBASE_TARGET_RATIO = 0.35;
+const TOP_REBASE_TRIGGER = 1;
+const BOTTOM_REBASE_TRIGGER = HALF_WIN;
 const JUMP_RELEASE_DELAY = 220;
 const NON_EDGE_MIN_FRAMES = 1;
 const NON_EDGE_MAX_FRAMES = 20;
@@ -65,8 +62,13 @@ export default function useLines(path, virt) {
   const scrollRequestId = useRef(0);
   const programmaticJump = useRef(null);
   const lastRange = useRef(null);
-  const manualDirection = useRef(0);
-  const directionResetTimer = useRef(0);
+
+  const updateWindowState = useCallback((nextBase, nextCount) => {
+    baseRef.current = nextBase;
+    windowCountRef.current = nextCount;
+    setBase(nextBase);
+    setWindowCount(nextCount);
+  }, []);
 
   const clampLine = useCallback(
     (line) => Math.max(0, Math.min(Math.max(0, lineCount - 1), line)),
@@ -84,24 +86,6 @@ export default function useLines(path, virt) {
       return Math.max(0, Math.min(maxBase, nextBase));
     },
     [lineCount],
-  );
-
-  const commitWindow = useCallback(
-    (nextBase, options = {}) => {
-      const clampedBase = clampBase(nextBase);
-      const nextCount = calcWindowCount(clampedBase);
-
-      baseRef.current = clampedBase;
-      windowCountRef.current = nextCount;
-      setBase(clampedBase);
-      setWindowCount(nextCount);
-      if (options.bumpTick !== false) {
-        setTick((t) => t + 1);
-      }
-
-      return { base: clampedBase, count: nextCount };
-    },
-    [calcWindowCount, clampBase],
   );
 
   const isScrollRequestSettled = useCallback((request, currentBase) => {
@@ -139,33 +123,7 @@ export default function useLines(path, virt) {
     scrollRequestId.current += 1;
   }, []);
 
-  const clearDirectionResetTimer = useCallback(() => {
-    if (directionResetTimer.current) {
-      window.clearTimeout(directionResetTimer.current);
-      directionResetTimer.current = 0;
-    }
-  }, []);
-
-  const setManualDirection = useCallback((direction, options = {}) => {
-    const nextDirection = Math.sign(direction || 0);
-    manualDirection.current = nextDirection;
-
-    const { sticky = false, resetAfter = 140 } = options;
-    clearDirectionResetTimer();
-
-    if (sticky || nextDirection === 0) {
-      return;
-    }
-
-    directionResetTimer.current = window.setTimeout(() => {
-      manualDirection.current = 0;
-      directionResetTimer.current = 0;
-    }, resetAfter);
-  }, [clearDirectionResetTimer]);
-
-  const noteWheel = useCallback((deltaY) => {
-    setManualDirection(deltaY, { resetAfter: 220 });
-  }, [setManualDirection]);
+  const noteWheel = useCallback(() => {}, []);
 
   const releaseProgrammaticJump = useCallback((requestId) => {
     if (programmaticJump.current?.id === requestId) {
@@ -193,43 +151,21 @@ export default function useLines(path, virt) {
 
   const syncWindow = useCallback(
     (nextBase, index, align = "start", options = {}) => {
-      const { count: nextCount } = commitWindow(nextBase);
+      const clampedBase = clampBase(nextBase);
+      const nextCount = calcWindowCount(clampedBase);
       const maxIndex = Math.max(0, nextCount - 1);
+
+      updateWindowState(clampedBase, nextCount);
+      setTick((t) => t + 1);
 
       requestScroll(Math.max(0, Math.min(maxIndex, index)), align, options);
     },
-    [commitWindow, requestScroll],
-  );
-
-  const rebaseWindow = useCallback(
-    (shift) => {
-      if (!shift) return;
-
-      const currentBase = baseRef.current;
-      const nextBase = clampBase(currentBase + shift);
-      const actualShift = nextBase - currentBase;
-      if (!actualShift) return;
-
-      const scroller = scrollerRef.current;
-      const prevScrollTop = scroller ? scroller.scrollTop : 0;
-
-      flushSync(() => {
-        commitWindow(nextBase);
-      });
-
-      if (scroller) {
-        const desiredScrollTop = Math.max(0, prevScrollTop - actualShift * ROW);
-        scroller.scrollTop = desiredScrollTop;
-      }
-    },
-    [clampBase, commitWindow],
+    [calcWindowCount, clampBase, requestScroll, updateWindowState],
   );
 
   useLayoutEffect(() => {
     const request = pendingScroll.current;
-    if (!request) {
-      return undefined;
-    }
+    if (!request) return undefined;
 
     let cancelled = false;
     let frameId = 0;
@@ -340,13 +276,10 @@ export default function useLines(path, virt) {
     programmaticJump.current = null;
     lastRange.current = null;
 
-    baseRef.current = 0;
-    windowCountRef.current = WINDOW_MAX;
+    updateWindowState(0, WINDOW_MAX);
     setReady(false);
     setError("");
-    setBase(0);
     setLineCount(0);
-    setWindowCount(WINDOW_MAX);
     setTick((t) => t + 1);
 
     if (!path) return undefined;
@@ -362,11 +295,8 @@ export default function useLines(path, virt) {
         const total = d.Lines || 0;
         const nextCount = Math.min(WINDOW_MAX, Math.max(0, total));
 
-        baseRef.current = 0;
-        windowCountRef.current = nextCount;
-        setBase(0);
+        updateWindowState(0, nextCount);
         setLineCount(total);
-        setWindowCount(nextCount);
         setTick((t) => t + 1);
 
         return fetch(`/api/chunk?start=0&count=${PAGE}`, {
@@ -388,7 +318,7 @@ export default function useLines(path, virt) {
     return () => {
       ctrl.abort();
     };
-  }, [path]);
+  }, [path, updateWindowState]);
 
   const abs = useCallback((i) => base + i, [base]);
 
@@ -494,24 +424,18 @@ export default function useLines(path, virt) {
       }
 
       const remainingBelow = lineCount - (currentBase + currentWindowCount);
-      const topTrigger = Math.max(1, Math.floor(currentWindowCount * TOP_REBASE_TRIGGER_RATIO));
-      const topTarget = Math.max(0, Math.min(currentWindowCount - 1, Math.floor(currentWindowCount * TOP_REBASE_TARGET_RATIO)));
-      const bottomTrigger = Math.max(topTrigger + 1, Math.floor(currentWindowCount * BOTTOM_REBASE_TRIGGER_RATIO));
-      const bottomTarget = Math.max(0, Math.min(currentWindowCount - 1, Math.floor(currentWindowCount * BOTTOM_REBASE_TARGET_RATIO)));
-      const direction = manualDirection.current;
-
-      if (startIndex >= bottomTrigger && remainingBelow > 0 && direction >= 0) {
-        const shift = Math.min(remainingBelow, Math.max(1, startIndex - bottomTarget));
-        rebaseWindow(shift);
+      if (startIndex >= BOTTOM_REBASE_TRIGGER && remainingBelow > 0) {
+        const shift = Math.min(HALF_WIN, remainingBelow);
+        syncWindow(currentBase + shift, startIndex - shift, "start", { lock: true });
         return;
       }
 
-      if (startIndex <= topTrigger && currentBase > 0 && direction <= 0) {
-        const shift = Math.min(currentBase, Math.max(1, topTarget - startIndex));
-        rebaseWindow(-shift);
+      if (startIndex <= TOP_REBASE_TRIGGER && currentBase > 0) {
+        const shift = Math.min(HALF_WIN, currentBase);
+        syncWindow(currentBase - shift, startIndex + shift, "start", { lock: true });
       }
     },
-    [ensure, lineCount, rebaseWindow],
+    [ensure, lineCount, syncWindow],
   );
 
   const animate = useCallback(
@@ -522,13 +446,10 @@ export default function useLines(path, virt) {
 
       const range = Math.max(1, dragRange.current);
       const rows = (drag.current / range) * SPEED * dt;
-      if (rows) {
-        setManualDirection(rows, { sticky: true });
-        virt.current?.scrollBy({ top: rows * ROW });
-      }
+      if (rows) virt.current?.scrollBy({ top: rows * ROW });
       raf.current = requestAnimationFrame(animate);
     },
-    [setManualDirection, virt],
+    [virt],
   );
 
   const startDrag = useCallback(
@@ -546,7 +467,6 @@ export default function useLines(path, virt) {
       const move = (ev) => {
         const delta = Math.max(-range, Math.min(range, ev.clientY - mid));
         drag.current = delta;
-        setManualDirection(delta, { sticky: true });
         trackRef.current.firstChild.style.top = `calc(50% + ${delta}px - ${
           HANDLE / 2
         }px)`;
@@ -554,7 +474,6 @@ export default function useLines(path, virt) {
 
       const up = () => {
         drag.current = 0;
-        setManualDirection(0);
         if (trackRef.current) {
           trackRef.current.firstChild.style.top = `calc(50% - ${HANDLE / 2}px)`;
         }
@@ -568,7 +487,7 @@ export default function useLines(path, virt) {
       window.addEventListener("pointerup", up);
       raf.current = requestAnimationFrame(animate);
     },
-    [animate, cancelProgrammaticScroll, setManualDirection],
+    [animate, cancelProgrammaticScroll],
   );
 
   useEffect(() => {
@@ -577,9 +496,8 @@ export default function useLines(path, virt) {
       if (openCtrl.current) openCtrl.current.abort();
       pageCtrls.current.forEach((ctrl) => ctrl.abort());
       pageCtrls.current.clear();
-      clearDirectionResetTimer();
     };
-  }, [clearDirectionResetTimer]);
+  }, []);
 
   return {
     abs,

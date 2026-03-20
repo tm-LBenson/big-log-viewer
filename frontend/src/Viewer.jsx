@@ -1,4 +1,4 @@
-import { useRef, useState, useLayoutEffect, forwardRef, useMemo } from "react";
+import { useRef, useState, useLayoutEffect, forwardRef, useMemo, useCallback } from "react";
 import { Virtuoso } from "react-virtuoso";
 import { ROW, KEEP } from "./constants";
 import useSearch from "./useSearch";
@@ -93,18 +93,25 @@ export default function Viewer({ virt, lines, path }) {
 
   const virtuosoComponents = useMemo(() => ({ Scroller, List }), [Scroller, List]);
 
+  const updateScrollWidth = useCallback(() => {
+    const nextWidth = listRef.current ? listRef.current.scrollWidth : 0;
+    setXw((currentWidth) => (currentWidth === nextWidth ? currentWidth : nextWidth));
+  }, []);
+
   useLayoutEffect(() => {
-    const upd = () => setXw(listRef.current ? listRef.current.scrollWidth : 0);
-    upd();
-    const ro = new ResizeObserver(upd);
+    updateScrollWidth();
+  }, [lines.tick, updateScrollWidth]);
+
+  useLayoutEffect(() => {
+    updateScrollWidth();
+    const ro = new ResizeObserver(updateScrollWidth);
     if (listRef.current) ro.observe(listRef.current);
-    const onResize = () => upd();
-    window.addEventListener("resize", onResize);
+    window.addEventListener("resize", updateScrollWidth);
     return () => {
       ro.disconnect();
-      window.removeEventListener("resize", onResize);
+      window.removeEventListener("resize", updateScrollWidth);
     };
-  }, [lines.tick]);
+  }, [updateScrollWidth]);
 
   useLayoutEffect(() => {
     if (!hbarRef.current || !scrollerRef.current) return;
