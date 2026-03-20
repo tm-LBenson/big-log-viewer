@@ -1,4 +1,4 @@
-import { useRef, useState, useLayoutEffect, forwardRef } from "react";
+import { useRef, useState, useLayoutEffect, forwardRef, useMemo } from "react";
 import { Virtuoso } from "react-virtuoso";
 import { ROW, KEEP } from "./constants";
 import useSearch from "./useSearch";
@@ -15,52 +15,83 @@ export default function Viewer({ virt, lines, path }) {
   const hbarRef = useRef(null);
   const [xw, setXw] = useState(0);
   const syncing = useRef(false);
-
-  const Scroller = forwardRef(function Scroller(props, ref) {
-    return (
-      <div
-        ref={(el) => {
-          scrollerRef.current = el;
-          if (lines.scrollerRef) lines.scrollerRef.current = el;
-          if (typeof ref === "function") ref(el);
-          else if (ref) ref.current = el;
-        }}
-        {...props}
-        className="virt-scroller"
-        onPointerDown={(e) => {
-          lines.cancelProgrammaticScroll?.();
-          props.onPointerDown?.(e);
-        }}
-        onWheel={(e) => {
-          lines.noteWheel?.(e.deltaY);
-          lines.cancelProgrammaticScroll?.();
-          props.onWheel?.(e);
-        }}
-        onScroll={(e) => {
-          props.onScroll?.(e);
-          if (hbarRef.current && !syncing.current) {
-            syncing.current = true;
-            hbarRef.current.scrollLeft = scrollerRef.current.scrollLeft;
-            syncing.current = false;
-          }
-        }}
-      />
-    );
+  const viewerRefs = useRef({
+    hbarRef,
+    listRef,
+    linesScrollerRef: lines.scrollerRef,
+    noteWheel: lines.noteWheel,
+    cancelProgrammaticScroll: lines.cancelProgrammaticScroll,
+    outerScrollerRef: scrollerRef,
+    syncing,
   });
 
-  const List = forwardRef(function List(props, ref) {
-    return (
-      <div
-        ref={(el) => {
-          listRef.current = el;
-          if (typeof ref === "function") ref(el);
-          else if (ref) ref.current = el;
-        }}
-        {...props}
-        className="virt-list"
-      />
-    );
-  });
+  viewerRefs.current.hbarRef = hbarRef;
+  viewerRefs.current.listRef = listRef;
+  viewerRefs.current.linesScrollerRef = lines.scrollerRef;
+  viewerRefs.current.noteWheel = lines.noteWheel;
+  viewerRefs.current.cancelProgrammaticScroll = lines.cancelProgrammaticScroll;
+  viewerRefs.current.outerScrollerRef = scrollerRef;
+  viewerRefs.current.syncing = syncing;
+
+  const Scroller = useMemo(
+    () =>
+      forwardRef(function ViewerScroller(props, ref) {
+        const refs = viewerRefs.current;
+        return (
+          <div
+            ref={(el) => {
+              refs.outerScrollerRef.current = el;
+              if (refs.linesScrollerRef) refs.linesScrollerRef.current = el;
+              if (typeof ref === "function") ref(el);
+              else if (ref) ref.current = el;
+            }}
+            {...props}
+            className="virt-scroller"
+            onPointerDown={(e) => {
+              refs.cancelProgrammaticScroll?.();
+              props.onPointerDown?.(e);
+            }}
+            onWheel={(e) => {
+              refs.noteWheel?.(e.deltaY);
+              refs.cancelProgrammaticScroll?.();
+              props.onWheel?.(e);
+            }}
+            onScroll={(e) => {
+              props.onScroll?.(e);
+              const hbar = refs.hbarRef.current;
+              const scroller = refs.outerScrollerRef.current;
+              if (hbar && scroller && !refs.syncing.current) {
+                refs.syncing.current = true;
+                hbar.scrollLeft = scroller.scrollLeft;
+                refs.syncing.current = false;
+              }
+            }}
+          />
+        );
+      }),
+    [],
+  );
+
+  const List = useMemo(
+    () =>
+      forwardRef(function ViewerList(props, ref) {
+        const refs = viewerRefs.current;
+        return (
+          <div
+            ref={(el) => {
+              refs.listRef.current = el;
+              if (typeof ref === "function") ref(el);
+              else if (ref) ref.current = el;
+            }}
+            {...props}
+            className="virt-list"
+          />
+        );
+      }),
+    [],
+  );
+
+  const virtuosoComponents = useMemo(() => ({ Scroller, List }), [Scroller, List]);
 
   useLayoutEffect(() => {
     const upd = () => setXw(listRef.current ? listRef.current.scrollWidth : 0);
@@ -169,7 +200,7 @@ export default function Viewer({ virt, lines, path }) {
             defaultItemHeight={ROW}
             fixedItemHeight={wrap ? undefined : ROW}
             rangeChanged={lines.handleRange}
-            components={{ Scroller, List }}
+            components={virtuosoComponents}
           />
           <div
             className="xbar"
