@@ -14,6 +14,7 @@ const EDGE_PIN_MAX_FRAMES = 24;
 const EDGE_STABLE_FRAMES = 3;
 const EDGE_TOLERANCE = 2;
 const ALIGN_TOLERANCE = 16;
+const MAX_QUEUED_JOYSTICK_ROWS = 1200;
 
 function isNearTop(scroller) {
   return !scroller || scroller.scrollTop <= EDGE_TOLERANCE;
@@ -35,6 +36,10 @@ function forceScrollerEdge(scroller, edge) {
   }
 }
 
+function clampQueuedRows(rows) {
+  return Math.max(-MAX_QUEUED_JOYSTICK_ROWS, Math.min(MAX_QUEUED_JOYSTICK_ROWS, rows));
+}
+
 export default function useLines(path, virt) {
   const [ready, setReady] = useState(false);
   const [lineCount, setLineCount] = useState(0);
@@ -54,6 +59,7 @@ export default function useLines(path, virt) {
   const dragRange = useRef(1);
   const raf = useRef(0);
   const last = useRef(0);
+  const queuedJoystickRows = useRef(0);
 
   const openCtrl = useRef(null);
   const pageCtrls = useRef(new Map());
@@ -63,10 +69,6 @@ export default function useLines(path, virt) {
   const lastRange = useRef(null);
   const manualDirection = useRef(0);
   const directionResetTimer = useRef(0);
-  const joystickActive = useRef(false);
-  const joystickTopAbs = useRef(0);
-  const baseRef = useRef(0);
-  const windowCountRef = useRef(WINDOW_MAX);
 
   const clampLine = useCallback(
     (line) => Math.max(0, Math.min(Math.max(0, lineCount - 1), line)),
@@ -77,11 +79,6 @@ export default function useLines(path, virt) {
     (nextBase) => Math.max(0, Math.min(WINDOW_MAX, lineCount - nextBase)),
     [lineCount],
   );
-
-  useEffect(() => {
-    baseRef.current = base;
-    windowCountRef.current = windowCount;
-  }, [base, windowCount]);
 
   const clampBase = useCallback(
     (nextBase) => {
@@ -154,25 +151,6 @@ export default function useLines(path, virt) {
     setManualDirection(deltaY, { resetAfter: 220 });
   }, [setManualDirection]);
 
-  const getVisibleRowCount = useCallback(() => {
-    const range = lastRange.current;
-    if (range) {
-      return Math.max(1, range.endIndex - range.startIndex + 1);
-    }
-    const scroller = scrollerRef.current;
-    if (scroller) {
-      return Math.max(1, Math.ceil(scroller.clientHeight / ROW));
-    }
-    return Math.max(1, Math.ceil(window.innerHeight / ROW));
-  }, []);
-
-  const getVisibleTopAbs = useCallback(() => {
-    const range = lastRange.current;
-    if (range) return range.base + range.startIndex;
-    return baseRef.current;
-  }, []);
-
-
   const releaseProgrammaticJump = useCallback((requestId) => {
     if (programmaticJump.current?.id === requestId) {
       programmaticJump.current = null;
@@ -212,39 +190,22 @@ export default function useLines(path, virt) {
     [calcWindowCount, clampBase, requestScroll],
   );
 
-  const scrollToAbsoluteTop = useCallback(
-    (targetTop) => {
-      if (!lineCount) return;
+  const applyQueuedJoystickRows = useCallback(() => {
+    if (pendingScroll.current || !queuedJoystickRows.current) {
+      return;
+    }
 
-      const visibleRows = getVisibleRowCount();
-      const maxTop = Math.max(0, lineCount - visibleRows);
-      const nextTop = Math.max(0, Math.min(maxTop, Math.round(targetTop)));
-      const currentBase = baseRef.current;
-      const currentCount = Math.max(1, windowCountRef.current);
-      const targetIndex = nextTop - currentBase;
-      const minBuffer = Math.max(8, Math.floor(currentCount * 0.18));
-      const maxBuffer = Math.max(minBuffer + 1, currentCount - visibleRows - Math.max(8, Math.floor(currentCount * 0.22)));
-
-      if (targetIndex >= minBuffer && targetIndex <= maxBuffer) {
-        virt.current?.scrollToIndex({
-          index: Math.max(0, Math.min(currentCount - 1, targetIndex)),
-          align: "start",
-          behavior: "auto",
-        });
-        return;
-      }
-
-      const idealIndex = Math.max(0, Math.min(currentCount - 1, Math.floor(currentCount * 0.42)));
-      const nextBase = clampBase(nextTop - idealIndex);
-      const nextIndex = Math.max(0, nextTop - nextBase);
-      syncWindow(nextBase, nextIndex, "start", { lock: true });
-    },
-    [clampBase, getVisibleRowCount, lineCount, syncWindow, virt],
-  );
+    const rows = queuedJoystickRows.current;
+    queuedJoystickRows.current = 0;
+    virt.current?.scrollBy({ top: rows * ROW });
+  }, [virt]);
 
   useLayoutEffect(() => {
     const request = pendingScroll.current;
-    if (!request) return undefined;
+    if (!request) {
+      applyQueuedJoystickRows();
+      return undefined;
+    }
 
     let cancelled = false;
     let frameId = 0;
@@ -258,6 +219,7 @@ export default function useLines(path, virt) {
       if (pendingScroll.current?.id === request.id) {
         pendingScroll.current = null;
       }
+      applyQueuedJoystickRows();
       releaseTimer = window.setTimeout(
         () => releaseProgrammaticJump(request.id),
         JUMP_RELEASE_DELAY,
@@ -306,6 +268,7 @@ export default function useLines(path, virt) {
       window.clearTimeout(releaseTimer);
     };
   }, [
+    applyQueuedJoystickRows,
     base,
     isScrollRequestSettled,
     scrollVersion,
@@ -360,11 +323,7 @@ export default function useLines(path, virt) {
     pendingScroll.current = null;
     programmaticJump.current = null;
     lastRange.current = null;
-
-    joystickActive.current = false;
-    joystickTopAbs.current = 0;
-    baseRef.current = 0;
-    windowCountRef.current = WINDOW_MAX;
+    queuedJoystickRows.current = 0;
 
     setReady(false);
     setError("");
@@ -505,11 +464,7 @@ export default function useLines(path, virt) {
       ensure(base + startIndex, base + endIndex);
       lastRange.current = { base, startIndex, endIndex };
 
-      if (!joystickActive.current) {
-        joystickTopAbs.current = base + startIndex;
-      }
-
-      if (joystickActive.current || programmaticJump.current) {
+      if (programmaticJump.current) {
         return;
       }
 
@@ -543,23 +498,29 @@ export default function useLines(path, virt) {
       const range = Math.max(1, dragRange.current);
       const rows = (drag.current / range) * SPEED * dt;
       if (rows) {
-        joystickActive.current = true;
         setManualDirection(rows, { sticky: true });
-        joystickTopAbs.current = getVisibleTopAbs();
-        joystickTopAbs.current += rows;
-        scrollToAbsoluteTop(joystickTopAbs.current);
+        if (pendingScroll.current) {
+          queuedJoystickRows.current = clampQueuedRows(
+            queuedJoystickRows.current + rows,
+          );
+        } else {
+          const appliedRows = rows + queuedJoystickRows.current;
+          queuedJoystickRows.current = 0;
+          virt.current?.scrollBy({ top: appliedRows * ROW });
+        }
+      } else if (!pendingScroll.current) {
+        applyQueuedJoystickRows();
       }
       raf.current = requestAnimationFrame(animate);
     },
-    [getVisibleTopAbs, scrollToAbsoluteTop, setManualDirection],
+    [applyQueuedJoystickRows, setManualDirection, virt],
   );
 
   const startDrag = useCallback(
     (e) => {
       e.preventDefault();
       cancelProgrammaticScroll();
-      joystickActive.current = true;
-      joystickTopAbs.current = getVisibleTopAbs();
+      queuedJoystickRows.current = 0;
       if (!trackRef.current) return;
 
       const rect = trackRef.current.getBoundingClientRect();
@@ -579,14 +540,13 @@ export default function useLines(path, virt) {
 
       const up = () => {
         drag.current = 0;
-        joystickActive.current = false;
-        joystickTopAbs.current = getVisibleTopAbs();
         setManualDirection(0);
         if (trackRef.current) {
           trackRef.current.firstChild.style.top = `calc(50% - ${HANDLE / 2}px)`;
         }
         cancelAnimationFrame(raf.current);
         last.current = 0;
+        applyQueuedJoystickRows();
         window.removeEventListener("pointermove", move);
         window.removeEventListener("pointerup", up);
       };
@@ -595,7 +555,7 @@ export default function useLines(path, virt) {
       window.addEventListener("pointerup", up);
       raf.current = requestAnimationFrame(animate);
     },
-    [animate, cancelProgrammaticScroll, setManualDirection],
+    [animate, applyQueuedJoystickRows, cancelProgrammaticScroll, setManualDirection],
   );
 
   useEffect(() => {
