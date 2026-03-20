@@ -1,4 +1,5 @@
 import { useState, useRef, useEffect, useCallback, useLayoutEffect } from "react";
+import { flushSync } from "react-dom";
 import { PAGE, WINDOW_MAX, HALF_WIN, ROW, HANDLE, SPEED } from "./constants";
 
 const TOP_REBASE_TRIGGER_RATIO = 0.2;
@@ -14,7 +15,6 @@ const EDGE_PIN_MAX_FRAMES = 24;
 const EDGE_STABLE_FRAMES = 3;
 const EDGE_TOLERANCE = 2;
 const ALIGN_TOLERANCE = 16;
-const MAX_QUEUED_JOYSTICK_ROWS = 1200;
 
 function isNearTop(scroller) {
   return !scroller || scroller.scrollTop <= EDGE_TOLERANCE;
@@ -36,10 +36,6 @@ function forceScrollerEdge(scroller, edge) {
   }
 }
 
-function clampQueuedRows(rows) {
-  return Math.max(-MAX_QUEUED_JOYSTICK_ROWS, Math.min(MAX_QUEUED_JOYSTICK_ROWS, rows));
-}
-
 export default function useLines(path, virt) {
   const [ready, setReady] = useState(false);
   const [lineCount, setLineCount] = useState(0);
@@ -59,7 +55,9 @@ export default function useLines(path, virt) {
   const dragRange = useRef(1);
   const raf = useRef(0);
   const last = useRef(0);
-  const queuedJoystickRows = useRef(0);
+
+  const baseRef = useRef(0);
+  const windowCountRef = useRef(WINDOW_MAX);
 
   const openCtrl = useRef(null);
   const pageCtrls = useRef(new Map());
@@ -88,6 +86,24 @@ export default function useLines(path, virt) {
     [lineCount],
   );
 
+  const commitWindow = useCallback(
+    (nextBase, options = {}) => {
+      const clampedBase = clampBase(nextBase);
+      const nextCount = calcWindowCount(clampedBase);
+
+      baseRef.current = clampedBase;
+      windowCountRef.current = nextCount;
+      setBase(clampedBase);
+      setWindowCount(nextCount);
+      if (options.bumpTick !== false) {
+        setTick((t) => t + 1);
+      }
+
+      return { base: clampedBase, count: nextCount };
+    },
+    [calcWindowCount, clampBase],
+  );
+
   const isScrollRequestSettled = useCallback((request, currentBase) => {
     const range = lastRange.current;
     if (!range || range.base !== currentBase) return false;
@@ -98,7 +114,7 @@ export default function useLines(path, virt) {
 
     if (request.edge === "bottom") {
       return (
-        range.endIndex >= Math.max(0, windowCount - 1 - ALIGN_TOLERANCE) &&
+        range.endIndex >= Math.max(0, windowCountRef.current - 1 - ALIGN_TOLERANCE) &&
         isNearBottom(scrollerRef.current)
       );
     }
@@ -115,7 +131,7 @@ export default function useLines(path, virt) {
     }
 
     return true;
-  }, [windowCount]);
+  }, []);
 
   const cancelProgrammaticScroll = useCallback(() => {
     pendingScroll.current = null;
@@ -177,33 +193,41 @@ export default function useLines(path, virt) {
 
   const syncWindow = useCallback(
     (nextBase, index, align = "start", options = {}) => {
-      const clampedBase = clampBase(nextBase);
-      const nextCount = calcWindowCount(clampedBase);
+      const { count: nextCount } = commitWindow(nextBase);
       const maxIndex = Math.max(0, nextCount - 1);
-
-      setBase(clampedBase);
-      setWindowCount(nextCount);
-      setTick((t) => t + 1);
 
       requestScroll(Math.max(0, Math.min(maxIndex, index)), align, options);
     },
-    [calcWindowCount, clampBase, requestScroll],
+    [commitWindow, requestScroll],
   );
 
-  const applyQueuedJoystickRows = useCallback(() => {
-    if (pendingScroll.current || !queuedJoystickRows.current) {
-      return;
-    }
+  const rebaseWindow = useCallback(
+    (shift) => {
+      if (!shift) return;
 
-    const rows = queuedJoystickRows.current;
-    queuedJoystickRows.current = 0;
-    virt.current?.scrollBy({ top: rows * ROW });
-  }, [virt]);
+      const currentBase = baseRef.current;
+      const nextBase = clampBase(currentBase + shift);
+      const actualShift = nextBase - currentBase;
+      if (!actualShift) return;
+
+      const scroller = scrollerRef.current;
+      const prevScrollTop = scroller ? scroller.scrollTop : 0;
+
+      flushSync(() => {
+        commitWindow(nextBase);
+      });
+
+      if (scroller) {
+        const desiredScrollTop = Math.max(0, prevScrollTop - actualShift * ROW);
+        scroller.scrollTop = desiredScrollTop;
+      }
+    },
+    [clampBase, commitWindow],
+  );
 
   useLayoutEffect(() => {
     const request = pendingScroll.current;
     if (!request) {
-      applyQueuedJoystickRows();
       return undefined;
     }
 
@@ -219,7 +243,6 @@ export default function useLines(path, virt) {
       if (pendingScroll.current?.id === request.id) {
         pendingScroll.current = null;
       }
-      applyQueuedJoystickRows();
       releaseTimer = window.setTimeout(
         () => releaseProgrammaticJump(request.id),
         JUMP_RELEASE_DELAY,
@@ -239,7 +262,7 @@ export default function useLines(path, virt) {
       const scroller = scrollerRef.current;
       forceScrollerEdge(scroller, request.edge);
 
-      const settled = isScrollRequestSettled(request, base);
+      const settled = isScrollRequestSettled(request, baseRef.current);
       stableFrames = settled ? stableFrames + 1 : 0;
 
       const reachedMinFrames = request.edge
@@ -267,14 +290,7 @@ export default function useLines(path, virt) {
       cancelAnimationFrame(frameId);
       window.clearTimeout(releaseTimer);
     };
-  }, [
-    applyQueuedJoystickRows,
-    base,
-    isScrollRequestSettled,
-    scrollVersion,
-    virt,
-    releaseProgrammaticJump,
-  ]);
+  }, [isScrollRequestSettled, releaseProgrammaticJump, scrollVersion, virt]);
 
   const fetchPage = useCallback(
     (p) => {
@@ -323,8 +339,9 @@ export default function useLines(path, virt) {
     pendingScroll.current = null;
     programmaticJump.current = null;
     lastRange.current = null;
-    queuedJoystickRows.current = 0;
 
+    baseRef.current = 0;
+    windowCountRef.current = WINDOW_MAX;
     setReady(false);
     setError("");
     setBase(0);
@@ -345,6 +362,8 @@ export default function useLines(path, virt) {
         const total = d.Lines || 0;
         const nextCount = Math.min(WINDOW_MAX, Math.max(0, total));
 
+        baseRef.current = 0;
+        windowCountRef.current = nextCount;
         setBase(0);
         setLineCount(total);
         setWindowCount(nextCount);
@@ -386,20 +405,23 @@ export default function useLines(path, virt) {
 
   const pinCurrentWindowEdge = useCallback(
     (edge) => {
-      const index = edge === "bottom" ? Math.max(0, windowCount - 1) : 0;
+      const currentCount = windowCountRef.current;
+      const index = edge === "bottom" ? Math.max(0, currentCount - 1) : 0;
       const align = edge === "bottom" ? "end" : "start";
       requestScroll(index, align, { edge, lock: true });
     },
-    [requestScroll, windowCount],
+    [requestScroll],
   );
 
   const jumpToLine = useCallback(
     (line, anchor = "context") => {
       if (!lineCount) return;
 
+      const currentBase = baseRef.current;
+      const currentWindowCount = windowCountRef.current;
       const target = clampLine(line);
       const nextCount = Math.min(WINDOW_MAX, lineCount);
-      let nextBase = base;
+      let nextBase = currentBase;
       let align = "start";
       let edge = null;
 
@@ -419,7 +441,7 @@ export default function useLines(path, virt) {
           edge = "bottom";
           break;
         default:
-          if (target < base || target >= base + windowCount) {
+          if (target < currentBase || target >= currentBase + currentWindowCount) {
             nextBase = target - HALF_WIN;
           }
           align = "start";
@@ -430,19 +452,19 @@ export default function useLines(path, virt) {
       const index = target - clampedBase;
       syncWindow(clampedBase, index, align, { edge, lock: true });
     },
-    [base, clampBase, clampLine, lineCount, syncWindow, windowCount],
+    [clampBase, clampLine, lineCount, syncWindow],
   );
 
   const goLine = useCallback((line) => jumpToLine(line, "context"), [jumpToLine]);
 
   const goTop = useCallback(() => {
     const scroller = scrollerRef.current;
-    if (base === 0 && isNearTop(scroller)) {
+    if (baseRef.current === 0 && isNearTop(scroller)) {
       pinCurrentWindowEdge("top");
       return;
     }
     jumpToLine(0, "top");
-  }, [base, jumpToLine, pinCurrentWindowEdge]);
+  }, [jumpToLine, pinCurrentWindowEdge]);
 
   const goMiddle = useCallback(
     () => jumpToLine(Math.floor(lineCount / 2), "center"),
@@ -452,41 +474,44 @@ export default function useLines(path, virt) {
   const goBottom = useCallback(() => {
     const tailBase = Math.max(0, lineCount - Math.min(WINDOW_MAX, lineCount));
     const scroller = scrollerRef.current;
-    if (base === tailBase && isNearBottom(scroller)) {
+    if (baseRef.current === tailBase && isNearBottom(scroller)) {
       pinCurrentWindowEdge("bottom");
       return;
     }
     jumpToLine(Math.max(0, lineCount - 1), "bottom");
-  }, [base, jumpToLine, lineCount, pinCurrentWindowEdge]);
+  }, [jumpToLine, lineCount, pinCurrentWindowEdge]);
 
   const handleRange = useCallback(
     ({ startIndex, endIndex }) => {
-      ensure(base + startIndex, base + endIndex);
-      lastRange.current = { base, startIndex, endIndex };
+      const currentBase = baseRef.current;
+      const currentWindowCount = windowCountRef.current;
+
+      ensure(currentBase + startIndex, currentBase + endIndex);
+      lastRange.current = { base: currentBase, startIndex, endIndex };
 
       if (programmaticJump.current) {
         return;
       }
 
-      const remainingBelow = lineCount - (base + windowCount);
-      const topTrigger = Math.max(1, Math.floor(windowCount * TOP_REBASE_TRIGGER_RATIO));
-      const topTarget = Math.max(0, Math.min(windowCount - 1, Math.floor(windowCount * TOP_REBASE_TARGET_RATIO)));
-      const bottomTrigger = Math.max(topTrigger + 1, Math.floor(windowCount * BOTTOM_REBASE_TRIGGER_RATIO));
-      const bottomTarget = Math.max(0, Math.min(windowCount - 1, Math.floor(windowCount * BOTTOM_REBASE_TARGET_RATIO)));
+      const remainingBelow = lineCount - (currentBase + currentWindowCount);
+      const topTrigger = Math.max(1, Math.floor(currentWindowCount * TOP_REBASE_TRIGGER_RATIO));
+      const topTarget = Math.max(0, Math.min(currentWindowCount - 1, Math.floor(currentWindowCount * TOP_REBASE_TARGET_RATIO)));
+      const bottomTrigger = Math.max(topTrigger + 1, Math.floor(currentWindowCount * BOTTOM_REBASE_TRIGGER_RATIO));
+      const bottomTarget = Math.max(0, Math.min(currentWindowCount - 1, Math.floor(currentWindowCount * BOTTOM_REBASE_TARGET_RATIO)));
       const direction = manualDirection.current;
 
       if (startIndex >= bottomTrigger && remainingBelow > 0 && direction >= 0) {
         const shift = Math.min(remainingBelow, Math.max(1, startIndex - bottomTarget));
-        syncWindow(base + shift, startIndex - shift, "start", { lock: true });
+        rebaseWindow(shift);
         return;
       }
 
-      if (startIndex <= topTrigger && base > 0 && direction <= 0) {
-        const shift = Math.min(base, Math.max(1, topTarget - startIndex));
-        syncWindow(base - shift, startIndex + shift, "start", { lock: true });
+      if (startIndex <= topTrigger && currentBase > 0 && direction <= 0) {
+        const shift = Math.min(currentBase, Math.max(1, topTarget - startIndex));
+        rebaseWindow(-shift);
       }
     },
-    [base, ensure, lineCount, syncWindow, windowCount],
+    [ensure, lineCount, rebaseWindow],
   );
 
   const animate = useCallback(
@@ -499,28 +524,17 @@ export default function useLines(path, virt) {
       const rows = (drag.current / range) * SPEED * dt;
       if (rows) {
         setManualDirection(rows, { sticky: true });
-        if (pendingScroll.current) {
-          queuedJoystickRows.current = clampQueuedRows(
-            queuedJoystickRows.current + rows,
-          );
-        } else {
-          const appliedRows = rows + queuedJoystickRows.current;
-          queuedJoystickRows.current = 0;
-          virt.current?.scrollBy({ top: appliedRows * ROW });
-        }
-      } else if (!pendingScroll.current) {
-        applyQueuedJoystickRows();
+        virt.current?.scrollBy({ top: rows * ROW });
       }
       raf.current = requestAnimationFrame(animate);
     },
-    [applyQueuedJoystickRows, setManualDirection, virt],
+    [setManualDirection, virt],
   );
 
   const startDrag = useCallback(
     (e) => {
       e.preventDefault();
       cancelProgrammaticScroll();
-      queuedJoystickRows.current = 0;
       if (!trackRef.current) return;
 
       const rect = trackRef.current.getBoundingClientRect();
@@ -546,7 +560,6 @@ export default function useLines(path, virt) {
         }
         cancelAnimationFrame(raf.current);
         last.current = 0;
-        applyQueuedJoystickRows();
         window.removeEventListener("pointermove", move);
         window.removeEventListener("pointerup", up);
       };
@@ -555,7 +568,7 @@ export default function useLines(path, virt) {
       window.addEventListener("pointerup", up);
       raf.current = requestAnimationFrame(animate);
     },
-    [animate, applyQueuedJoystickRows, cancelProgrammaticScroll, setManualDirection],
+    [animate, cancelProgrammaticScroll, setManualDirection],
   );
 
   useEffect(() => {
