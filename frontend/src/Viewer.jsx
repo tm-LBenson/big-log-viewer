@@ -1,4 +1,4 @@
-import { useRef, useState, useLayoutEffect, forwardRef, useMemo, useCallback } from "react";
+import { useRef, useState, useEffect, forwardRef, useMemo, useCallback } from "react";
 import { Virtuoso } from "react-virtuoso";
 import { ROW, KEEP } from "./constants";
 import useSearch from "./useSearch";
@@ -98,11 +98,11 @@ export default function Viewer({ virt, lines, path }) {
     setXw((currentWidth) => (currentWidth === nextWidth ? currentWidth : nextWidth));
   }, []);
 
-  useLayoutEffect(() => {
+  useEffect(() => {
     updateScrollWidth();
   }, [lines.tick, updateScrollWidth]);
 
-  useLayoutEffect(() => {
+  useEffect(() => {
     updateScrollWidth();
     const ro = new ResizeObserver(updateScrollWidth);
     if (listRef.current) ro.observe(listRef.current);
@@ -113,7 +113,7 @@ export default function Viewer({ virt, lines, path }) {
     };
   }, [updateScrollWidth]);
 
-  useLayoutEffect(() => {
+  useEffect(() => {
     if (!hbarRef.current || !scrollerRef.current) return;
     const onH = () => {
       if (syncing.current) return;
@@ -200,10 +200,14 @@ export default function Viewer({ virt, lines, path }) {
           <Virtuoso
             ref={virt}
             totalCount={lines.windowCount}
-            itemContent={(index) => <Row i={index} />}
-            computeItemKey={(index) => lines.abs(index)}
+            itemContent={(index) => (
+              <Row
+                i={index}
+                tick={lines.tick}
+              />
+            )}
             style={{ height: "100%", width: "100%", paddingRight: 20 }}
-            overscan={KEEP * ROW}
+            increaseViewportBy={{ top: KEEP * ROW, bottom: KEEP * ROW }}
             defaultItemHeight={ROW}
             fixedItemHeight={wrap ? undefined : ROW}
             rangeChanged={lines.handleRange}

@@ -12,6 +12,7 @@ const EDGE_PIN_MAX_FRAMES = 24;
 const EDGE_STABLE_FRAMES = 3;
 const EDGE_TOLERANCE = 2;
 const ALIGN_TOLERANCE = 16;
+const BUFFER_PAGES = 2;
 
 function isNearTop(scroller) {
   return !scroller || scroller.scrollTop <= EDGE_TOLERANCE;
@@ -62,6 +63,16 @@ export default function useLines(path, virt) {
   const scrollRequestId = useRef(0);
   const programmaticJump = useRef(null);
   const lastRange = useRef(null);
+
+  const refreshFrame = useRef(0);
+
+  const scheduleRefresh = useCallback(() => {
+    if (refreshFrame.current) return;
+    refreshFrame.current = window.requestAnimationFrame(() => {
+      refreshFrame.current = 0;
+      setTick((t) => t + 1);
+    });
+  }, []);
 
   const updateWindowState = useCallback((nextBase, nextCount) => {
     baseRef.current = nextBase;
@@ -243,7 +254,7 @@ export default function useLines(path, virt) {
         .then((lines) => {
           if (ctrl.signal.aborted) return;
           cache.current.set(p, lines || []);
-          setTick((t) => t + 1);
+          scheduleRefresh();
         })
         .catch(() => {})
         .finally(() => {
@@ -251,13 +262,13 @@ export default function useLines(path, virt) {
           pageCtrls.current.delete(p);
         });
     },
-    [lineCount],
+    [lineCount, scheduleRefresh],
   );
 
   const ensure = useCallback(
     (fromAbs, toAbs) => {
-      const fromPage = Math.floor(fromAbs / PAGE) - 1;
-      const toPage = Math.floor(toAbs / PAGE) + 1;
+      const fromPage = Math.floor(fromAbs / PAGE) - BUFFER_PAGES;
+      const toPage = Math.floor(toAbs / PAGE) + BUFFER_PAGES;
       for (let p = fromPage; p <= toPage; p += 1) {
         if (p >= 0) fetchPage(p);
       }
@@ -269,6 +280,11 @@ export default function useLines(path, virt) {
     if (openCtrl.current) openCtrl.current.abort();
     pageCtrls.current.forEach((ctrl) => ctrl.abort());
     pageCtrls.current.clear();
+
+    if (refreshFrame.current) {
+      cancelAnimationFrame(refreshFrame.current);
+      refreshFrame.current = 0;
+    }
 
     cache.current.clear();
     pending.current.clear();
@@ -492,6 +508,7 @@ export default function useLines(path, virt) {
 
   useEffect(() => {
     return () => {
+      if (refreshFrame.current) cancelAnimationFrame(refreshFrame.current);
       if (raf.current) cancelAnimationFrame(raf.current);
       if (openCtrl.current) openCtrl.current.abort();
       pageCtrls.current.forEach((ctrl) => ctrl.abort());
