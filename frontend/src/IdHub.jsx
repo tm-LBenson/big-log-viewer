@@ -9,16 +9,42 @@ const CONNECTING_STATES = new Set([
   "waiting_token",
 ]);
 
-function sortSources(items) {
+const SOURCE_KIND = "source";
+const TARGET_KIND = "target";
+
+function sortResources(items) {
   return [...items].sort((left, right) =>
-    sourceName(left).localeCompare(sourceName(right), undefined, {
+    resourceName(left).localeCompare(resourceName(right), undefined, {
       sensitivity: "base",
     }),
   );
 }
 
-function sourceName(source) {
-  return source?.attributes?.name || source?.id || "Unnamed source";
+function resourceName(resource) {
+  return resource?.attributes?.name || resource?.id || "Unnamed job";
+}
+
+function selectionValue(kind, id) {
+  return kind && id ? `${kind}:${id}` : "";
+}
+
+function parseSelection(value) {
+  const raw = String(value || "").trim();
+  if (!raw) return { kind: SOURCE_KIND, id: "" };
+  const splitAt = raw.indexOf(":");
+  if (splitAt === -1) {
+    return { kind: SOURCE_KIND, id: raw };
+  }
+  const kind = raw.slice(0, splitAt) === TARGET_KIND ? TARGET_KIND : SOURCE_KIND;
+  return {
+    kind,
+    id: raw.slice(splitAt + 1),
+  };
+}
+
+function normalizeSelectionValue(value) {
+  const parsed = parseSelection(value);
+  return selectionValue(parsed.kind, parsed.id);
 }
 
 function tenantHost(value) {
@@ -88,10 +114,11 @@ function statusTone(state, connected) {
   };
 }
 
-function statusText({ connected, sessionState, statusMessage, sourcesCount }) {
+function statusText({ connected, sessionState, statusMessage, sourcesCount, targetsCount }) {
   if (connected) {
-    return sourcesCount
-      ? `${pluralize(sourcesCount, "source")} ready.`
+    const total = sourcesCount + targetsCount;
+    return total
+      ? `${pluralize(total, "job")} ready.`
       : "Connected to IDHub.";
   }
   if (CONNECTING_STATES.has(sessionState)) {
@@ -103,9 +130,36 @@ function statusText({ connected, sessionState, statusMessage, sourcesCount }) {
   return statusMessage || "Enter a tenant URL to connect.";
 }
 
+function totalBucketValue(bucket) {
+  const value = Number(bucket?.total);
+  return Number.isFinite(value) ? value : 0;
+}
+
+function totalSinkChanges(sinkStats) {
+  if (!sinkStats || typeof sinkStats !== "object") return null;
+
+  let total = 0;
+  let foundStats = false;
+
+  for (const sink of Object.values(sinkStats)) {
+    if (!sink || typeof sink !== "object") continue;
+    for (const actor of [sink.personStats, sink.groupStats]) {
+      if (!actor || typeof actor !== "object") continue;
+      foundStats = true;
+      total += totalBucketValue(actor.creationStats);
+      total += totalBucketValue(actor.updateStats);
+      total += totalBucketValue(actor.deletionStats);
+      total += totalBucketValue(actor.enableStats);
+      total += totalBucketValue(actor.disableStats);
+    }
+  }
+
+  return foundStats ? total : null;
+}
+
 export default function IdHub({ onOpenLog }) {
   const initial = useMemo(() => loadIdHub(), []);
-  const initialKey = makeKey(initial.tenantUrl, initial.sourceId);
+  const initialKey = makeKey(initial.tenantUrl, initial.jobSelection);
   const initialCache = readCache(initial, initialKey);
 
   const [tenantUrl, setTenantUrl] = useState(initial.tenantUrl || "");
@@ -119,24 +173,33 @@ export default function IdHub({ onOpenLog }) {
   const [errorMessage, setErrorMessage] = useState("");
   const [connectionInfo, setConnectionInfo] = useState(null);
   const [sources, setSources] = useState([]);
-  const [sourceId, setSourceId] = useState(initial.sourceId || "");
+  const [targets, setTargets] = useState([]);
+  const [jobSelection, setJobSelection] = useState(initial.jobSelection || "");
   const [jobs, setJobs] = useState(initialCache.jobs || []);
   const [page, setPage] = useState(initialCache.page || 0);
+  const [nextLink, setNextLink] = useState(initialCache.nextLink || "");
   const [end, setEnd] = useState(!!initialCache.end);
   const [loadingJobs, setLoadingJobs] = useState(false);
   const [connecting, setConnecting] = useState(false);
 
-  const bucket = useMemo(() => makeKey(tenantUrl, sourceId), [tenantUrl, sourceId]);
+  const bucket = useMemo(() => makeKey(tenantUrl, jobSelection), [tenantUrl, jobSelection]);
   const connected = Boolean(connectionInfo?.connected) || sessionState === "connected";
-  const canLoadJobs = Boolean(sessionId && sourceId && connected);
+  const selection = useMemo(() => parseSelection(jobSelection), [jobSelection]);
+  const selectedKind = selection.kind;
+  const selectedId = selection.id;
+  const canLoadJobs = Boolean(sessionId && selectedId && connected);
   const tone = statusTone(sessionState, connected);
-  const selectedSource = useMemo(
-    () => sources.find((item) => item.id === sourceId) || null,
-    [sourceId, sources],
-  );
+  const selectedResource = useMemo(() => {
+    const options = selectedKind === TARGET_KIND ? targets : sources;
+    return options.find((item) => item.id === selectedId) || null;
+  }, [selectedId, selectedKind, sources, targets]);
   const sourceLabels = useMemo(
-    () => new Map(sources.map((item) => [item.id, sourceName(item)])),
+    () => new Map(sources.map((item) => [item.id, resourceName(item)])),
     [sources],
+  );
+  const targetLabels = useMemo(
+    () => new Map(targets.map((item) => [item.id, resourceName(item)])),
+    [targets],
   );
   const currentTenantHost = useMemo(() => tenantHost(tenantUrl), [tenantUrl]);
   const compactStatus = statusText({
@@ -144,14 +207,30 @@ export default function IdHub({ onOpenLog }) {
     sessionState,
     statusMessage,
     sourcesCount: sources.length,
+    targetsCount: targets.length,
   });
   const showBrowserHint = CONNECTING_STATES.has(sessionState);
   const tenantLocked = connected || showBrowserHint;
+  const headers = useMemo(() => {
+    if (selectedKind === TARGET_KIND) {
+      return {
+        primary: "Synchronized",
+        secondary: "Applied",
+        system: "Target",
+      };
+    }
+    return {
+      primary: "Ingested",
+      secondary: "Consolidated",
+      system: "Source",
+    };
+  }, [selectedKind]);
 
   useEffect(() => {
     const cached = readCache(loadIdHub(), bucket);
     setJobs(cached.jobs || []);
     setPage(cached.page || 0);
+    setNextLink(cached.nextLink || "");
     setEnd(!!cached.end);
   }, [bucket]);
 
@@ -159,42 +238,46 @@ export default function IdHub({ onOpenLog }) {
     const existing = loadIdHub();
     const caches = {
       ...(existing.caches || {}),
-      [bucket]: { jobs, page, end },
+      [bucket]: { jobs, page, nextLink, end },
     };
     saveIdHub({
       tenantUrl,
       sessionId,
-      sourceId,
+      jobSelection,
       caches,
     });
-  }, [tenantUrl, sessionId, sourceId, bucket, jobs, page, end]);
+  }, [tenantUrl, sessionId, jobSelection, bucket, jobs, page, nextLink, end]);
 
-  const applyStatus = useCallback(
-    (data) => {
-      const nextState = data?.state || (data?.connected ? "connected" : "idle");
-      const nextSources = Array.isArray(data?.sources) ? sortSources(data.sources) : [];
+  const applyStatus = useCallback((data) => {
+    const nextState = data?.state || (data?.connected ? "connected" : "idle");
+    const nextSources = Array.isArray(data?.sources) ? sortResources(data.sources) : [];
+    const nextTargets = Array.isArray(data?.sinks) ? sortResources(data.sinks) : [];
+    const nextSelections = [
+      ...nextSources.map((item) => selectionValue(SOURCE_KIND, item.id)),
+      ...nextTargets.map((item) => selectionValue(TARGET_KIND, item.id)),
+    ];
 
-      setConnectionInfo(data || null);
-      setSessionState(nextState);
-      setStatusMessage(
-        data?.message || (data?.connected ? "Connected to IDHub." : "Enter a tenant URL to connect."),
-      );
-      setErrorMessage(data?.lastError || "");
-      setSources(nextSources);
-      if (nextSources.length) {
-        setSourceId((current) => {
-          if (nextSources.some((item) => item.id === current)) {
-            return current;
-          }
-          return nextSources[0].id;
-        });
-      } else {
-        setSourceId("");
-      }
-      return CONNECTING_STATES.has(nextState);
-    },
-    [setSourceId],
-  );
+    setConnectionInfo(data || null);
+    setSessionState(nextState);
+    setStatusMessage(
+      data?.message || (data?.connected ? "Connected to IDHub." : "Enter a tenant URL to connect."),
+    );
+    setErrorMessage(data?.lastError || "");
+    setSources(nextSources);
+    setTargets(nextTargets);
+    if (nextSelections.length) {
+      setJobSelection((current) => {
+        const normalized = normalizeSelectionValue(current);
+        if (normalized && nextSelections.includes(normalized)) {
+          return normalized;
+        }
+        return nextSelections[0];
+      });
+    } else {
+      setJobSelection("");
+    }
+    return CONNECTING_STATES.has(nextState);
+  }, []);
 
   const refreshStatus = useCallback(async () => {
     if (!sessionId) return false;
@@ -206,6 +289,8 @@ export default function IdHub({ onOpenLog }) {
       setSessionId("");
       setSessionState("idle");
       setSources([]);
+      setTargets([]);
+      setJobSelection("");
       setStatusMessage("Your previous IDHub session is no longer available. Connect again.");
       return false;
     }
@@ -242,6 +327,7 @@ export default function IdHub({ onOpenLog }) {
   const clearJobs = useCallback(() => {
     setJobs([]);
     setPage(0);
+    setNextLink("");
     setEnd(false);
   }, []);
 
@@ -277,6 +363,8 @@ export default function IdHub({ onOpenLog }) {
     setSessionId("");
     setConnectionInfo(null);
     setSources([]);
+    setTargets([]);
+    setJobSelection("");
     setSessionState("idle");
     setStatusMessage("Disconnected from IDHub.");
     setErrorMessage("");
@@ -299,21 +387,46 @@ export default function IdHub({ onOpenLog }) {
     try {
       const query = new URLSearchParams({
         session: sessionId,
-        sourceId,
-        page: String(reset ? 0 : page),
         size: "20",
       });
+      if (selectedKind === TARGET_KIND) {
+        query.set("sinkId", selectedId);
+      } else {
+        query.set("sourceId", selectedId);
+      }
+
+      const continuation = !reset ? nextLink.trim() : "";
+      if (continuation) {
+        query.set("next", continuation);
+      } else if (selectedKind !== TARGET_KIND) {
+        query.set("page", String(reset ? 0 : page));
+      }
+
       const response = await fetch(`/api/idhub/jobs?${query.toString()}`);
       const data = await parseResponse(response, "Failed to load IDHub jobs");
       const nextJobs = Array.isArray(data?.data) ? data.data : [];
+      const responseNext = typeof data?.links?.next === "string" ? data.links.next : "";
+      const usingTokenPagination =
+        selectedKind === TARGET_KIND || Boolean(continuation) || Boolean(responseNext);
+
       if (reset) {
         setJobs(nextJobs);
-        setPage(1);
-        setEnd(!nextJobs.length);
       } else {
         setJobs((current) => current.concat(nextJobs));
-        setPage((current) => current + 1);
-        if (!nextJobs.length) setEnd(true);
+      }
+
+      setNextLink(responseNext);
+
+      if (usingTokenPagination) {
+        setEnd(!responseNext);
+        if (reset) setPage(0);
+      } else {
+        if (reset) {
+          setPage(1);
+        } else {
+          setPage((current) => current + 1);
+        }
+        setEnd(!nextJobs.length);
       }
     } catch (error) {
       setErrorMessage(error?.message || "Failed to load IDHub jobs.");
@@ -368,6 +481,56 @@ export default function IdHub({ onOpenLog }) {
 
   const num = (value) => (Number.isFinite(value) ? value : "");
 
+  const primaryMetric = useCallback(
+    (job) => {
+      const stats = job?.attributes?.statistics?.content;
+      if (selectedKind === TARGET_KIND) {
+        return num(Number(stats?.synchronizerStats?.synchronized));
+      }
+      return num(Number(stats?.sourceStats?.ingested));
+    },
+    [selectedKind],
+  );
+
+  const secondaryMetric = useCallback(
+    (job) => {
+      const stats = job?.attributes?.statistics?.content;
+      if (selectedKind === TARGET_KIND) {
+        const total = totalSinkChanges(stats?.sinkStats);
+        return total == null ? "" : total;
+      }
+      return num(Number(stats?.sourceStats?.consolidated));
+    },
+    [selectedKind],
+  );
+
+  const systemInfo = useCallback(
+    (job) => {
+      const attributes = job?.attributes || {};
+      const rowSinkIds = Array.isArray(attributes["sink-ids"]) ? attributes["sink-ids"] : [];
+      if (rowSinkIds.length) {
+        return {
+          title: rowSinkIds.join(", "),
+          label: rowSinkIds.map((id) => targetLabels.get(id) || id).join(", "),
+        };
+      }
+
+      const rowSourceId = attributes["source-id"];
+      if (rowSourceId) {
+        return {
+          title: rowSourceId,
+          label: sourceLabels.get(rowSourceId) || rowSourceId,
+        };
+      }
+
+      return {
+        title: selectedId,
+        label: selectedResource ? resourceName(selectedResource) : "",
+      };
+    },
+    [selectedId, selectedResource, sourceLabels, targetLabels],
+  );
+
   return (
     <div className="idhub-page">
       <div className="idhub-panel">
@@ -385,7 +548,7 @@ export default function IdHub({ onOpenLog }) {
           <span style={{ color: "var(--text-weak)" }}>{compactStatus}</span>
         </div>
 
-        {(currentTenantHost || selectedSource || (connected && sources.length)) && (
+        {(currentTenantHost || selectedResource || (connected && (sources.length || targets.length))) && (
           <div className="idhub-summary-row">
             {currentTenantHost && (
               <span className="idhub-summary-pill" title={tenantUrl}>
@@ -395,9 +558,13 @@ export default function IdHub({ onOpenLog }) {
             {connected && sources.length > 0 && (
               <span className="idhub-summary-pill">{pluralize(sources.length, "source")}</span>
             )}
-            {selectedSource && (
-              <span className="idhub-summary-pill" title={sourceId}>
-                {sourceName(selectedSource)}
+            {connected && targets.length > 0 && (
+              <span className="idhub-summary-pill">{pluralize(targets.length, "target")}</span>
+            )}
+            {selectedResource && (
+              <span className="idhub-summary-pill" title={selectedId}>
+                {selectedKind === TARGET_KIND ? "Target: " : "Source: "}
+                {resourceName(selectedResource)}
               </span>
             )}
           </div>
@@ -416,28 +583,44 @@ export default function IdHub({ onOpenLog }) {
           </label>
 
           <label className="idhub-field-wrap">
-            <span className="idhub-field-label">Source</span>
+            <span className="idhub-field-label">Job</span>
             <select
               className="field"
-              value={sourceId}
-              onChange={(event) => setSourceId(event.target.value)}
-              disabled={!connected || !sources.length}
+              value={jobSelection}
+              onChange={(event) => setJobSelection(normalizeSelectionValue(event.target.value))}
+              disabled={!connected || (!sources.length && !targets.length)}
             >
               <option value="">
                 {connected
-                  ? sources.length
-                    ? "Select a source"
-                    : "No sources returned"
+                  ? sources.length || targets.length
+                    ? "Select a job"
+                    : "No jobs returned"
                   : "Connect first"}
               </option>
-              {sources.map((source) => (
-                <option
-                  key={source.id}
-                  value={source.id}
-                >
-                  {sourceName(source)}
-                </option>
-              ))}
+              {sources.length > 0 && (
+                <optgroup label="Source">
+                  {sources.map((source) => (
+                    <option
+                      key={source.id}
+                      value={selectionValue(SOURCE_KIND, source.id)}
+                    >
+                      {resourceName(source)}
+                    </option>
+                  ))}
+                </optgroup>
+              )}
+              {targets.length > 0 && (
+                <optgroup label="Target">
+                  {targets.map((target) => (
+                    <option
+                      key={target.id}
+                      value={selectionValue(TARGET_KIND, target.id)}
+                    >
+                      {resourceName(target)}
+                    </option>
+                  ))}
+                </optgroup>
+              )}
             </select>
           </label>
         </div>
@@ -511,20 +694,16 @@ export default function IdHub({ onOpenLog }) {
               <th style={{ textAlign: "left", padding: "8px 10px" }}>Job ID</th>
               <th style={{ textAlign: "left", padding: "8px 10px" }}>State</th>
               <th style={{ textAlign: "left", padding: "8px 10px" }}>Duration</th>
-              <th style={{ textAlign: "left", padding: "8px 10px" }}>Ingested</th>
-              <th style={{ textAlign: "left", padding: "8px 10px" }}>Consolidated</th>
-              <th style={{ textAlign: "left", padding: "8px 10px" }}>Source</th>
+              <th style={{ textAlign: "left", padding: "8px 10px" }}>{headers.primary}</th>
+              <th style={{ textAlign: "left", padding: "8px 10px" }}>{headers.secondary}</th>
+              <th style={{ textAlign: "left", padding: "8px 10px" }}>{headers.system}</th>
             </tr>
           </thead>
           <tbody>
             {jobs.map((job) => {
               const attributes = job?.attributes || {};
               const updates = attributes.updates || [];
-              const ingested = attributes?.statistics?.content?.sourceStats?.ingested;
-              const consolidated =
-                attributes?.statistics?.content?.sourceStats?.consolidated;
-              const rowSourceId = attributes["source-id"];
-              const rowSourceLabel = sourceLabels.get(rowSourceId) || rowSourceId;
+              const rowSystem = systemInfo(job);
               return (
                 <tr
                   key={job.id}
@@ -542,14 +721,14 @@ export default function IdHub({ onOpenLog }) {
                   </td>
                   <td style={{ padding: "8px 10px" }}>{lastState(updates)}</td>
                   <td style={{ padding: "8px 10px" }}>{duration(updates)}</td>
-                  <td style={{ padding: "8px 10px" }}>{num(ingested)}</td>
-                  <td style={{ padding: "8px 10px" }}>{num(consolidated)}</td>
+                  <td style={{ padding: "8px 10px" }}>{primaryMetric(job)}</td>
+                  <td style={{ padding: "8px 10px" }}>{secondaryMetric(job)}</td>
                   <td
                     className="idhub-table-source"
                     style={{ padding: "8px 10px" }}
-                    title={rowSourceId || ""}
+                    title={rowSystem.title || ""}
                   >
-                    {rowSourceLabel}
+                    {rowSystem.label}
                   </td>
                 </tr>
               );
@@ -565,7 +744,7 @@ export default function IdHub({ onOpenLog }) {
                   }}
                 >
                   {connected
-                    ? "Choose a source and load jobs."
+                    ? "Choose a source or target and load jobs."
                     : "Connect to IDHub to browse jobs."}
                 </td>
               </tr>

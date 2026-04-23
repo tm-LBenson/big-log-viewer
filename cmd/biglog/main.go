@@ -75,6 +75,7 @@ func main() {
 	http.HandleFunc("/api/idhub/connect/status", idhubConnectStatus)
 	http.HandleFunc("/api/idhub/connect/disconnect", idhubConnectDisconnect)
 	http.HandleFunc("/api/idhub/sources", idhubSources)
+	http.HandleFunc("/api/idhub/sinks", idhubSinks)
 	http.HandleFunc("/api/idhub/jobs", idhubJobs)
 	http.HandleFunc("/api/idhub/log", idhubLog)
 
@@ -497,13 +498,35 @@ func getAuth(r *http.Request) (string, error) {
 	return auth, nil
 }
 
+func extractNextPageToken(raw string) string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return ""
+	}
+	if strings.Contains(raw, "page[token]") || strings.Contains(raw, "=") || strings.Contains(raw, "&") {
+		if !strings.HasPrefix(raw, "?") {
+			raw = "?" + raw
+		}
+		u, err := url.Parse(raw)
+		if err == nil {
+			if token := strings.TrimSpace(u.Query().Get("page[token]")); token != "" {
+				return token
+			}
+		}
+	}
+	return raw
+}
+
 func idhubJobs(w http.ResponseWriter, r *http.Request) {
 	proxy, err := resolveIDHubProxyContext(r)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
+
 	source := strings.TrimSpace(r.URL.Query().Get("sourceId"))
+	sink := strings.TrimSpace(r.URL.Query().Get("sinkId"))
+	next := strings.TrimSpace(r.URL.Query().Get("next"))
 	page := strings.TrimSpace(r.URL.Query().Get("page"))
 	if page == "" {
 		page = "0"
@@ -512,17 +535,36 @@ func idhubJobs(w http.ResponseWriter, r *http.Request) {
 	if size == "" {
 		size = "20"
 	}
-	if source == "" {
-		http.Error(w, "sourceId is required", http.StatusBadRequest)
+
+	switch {
+	case source == "" && sink == "":
+		http.Error(w, "sourceId or sinkId is required", http.StatusBadRequest)
+		return
+	case source != "" && sink != "":
+		http.Error(w, "provide either sourceId or sinkId, not both", http.StatusBadRequest)
 		return
 	}
 
-	u := fmt.Sprintf("%s/v1/tenants/%s/jobs?sourceId=%s&page[size]=%s&page[number]=%s",
+	params := url.Values{}
+	if source != "" {
+		params.Set("sourceId", source)
+	}
+	if sink != "" {
+		params.Set("sinkId", sink)
+	}
+	if token := extractNextPageToken(next); token != "" {
+		params.Set("page[token]", token)
+	} else {
+		params.Set("page[size]", size)
+		if sink == "" {
+			params.Set("page[number]", page)
+		}
+	}
+
+	u := fmt.Sprintf("%s/v1/tenants/%s/jobs?%s",
 		proxy.Base,
 		url.PathEscape(proxy.Tenant),
-		url.QueryEscape(source),
-		url.QueryEscape(size),
-		url.QueryEscape(page),
+		params.Encode(),
 	)
 
 	req, _ := http.NewRequest(http.MethodGet, u, nil)

@@ -57,6 +57,7 @@ type idhubAuthSession struct {
 	RefreshToken     string
 	AccessTokenExp   time.Time
 	Sources          []idhubResource
+	Sinks            []idhubResource
 	CreatedAt        time.Time
 	UpdatedAt        time.Time
 
@@ -85,7 +86,9 @@ type idhubStatusResponse struct {
 	AuthHost         string          `json:"authHost,omitempty"`
 	ExpiresAt        string          `json:"expiresAt,omitempty"`
 	SourceCount      int             `json:"sourceCount,omitempty"`
+	SinkCount        int             `json:"sinkCount,omitempty"`
 	Sources          []idhubResource `json:"sources,omitempty"`
+	Sinks            []idhubResource `json:"sinks,omitempty"`
 	CreatedAt        string          `json:"createdAt,omitempty"`
 	UpdatedAt        string          `json:"updatedAt,omitempty"`
 }
@@ -124,7 +127,7 @@ type idhubTokenResponse struct {
 	RefreshTokenOut string `json:"refresh_token,omitempty"`
 }
 
-type idhubSourceList struct {
+type idhubResourceList struct {
 	Data []idhubResource `json:"data"`
 }
 
@@ -225,7 +228,23 @@ func idhubSources(w http.ResponseWriter, r *http.Request) {
 	sess.mu.RLock()
 	data := append([]idhubResource(nil), sess.Sources...)
 	sess.mu.RUnlock()
-	writeJSON(w, idhubSourceList{Data: data})
+	writeJSON(w, idhubResourceList{Data: data})
+}
+
+func idhubSinks(w http.ResponseWriter, r *http.Request) {
+	sess, err := requireIDHubSession(r)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	if err := sess.fetchSinks(r.Context()); err != nil {
+		http.Error(w, err.Error(), http.StatusBadGateway)
+		return
+	}
+	sess.mu.RLock()
+	data := append([]idhubResource(nil), sess.Sinks...)
+	sess.mu.RUnlock()
+	writeJSON(w, idhubResourceList{Data: data})
 }
 
 func requireIDHubSession(r *http.Request) (*idhubAuthSession, error) {
@@ -266,7 +285,9 @@ func (s *idhubAuthSession) status() idhubStatusResponse {
 		ClientID:         s.ClientID,
 		AuthHost:         s.AuthHost,
 		SourceCount:      len(s.Sources),
+		SinkCount:        len(s.Sinks),
 		Sources:          append([]idhubResource(nil), s.Sources...),
+		Sinks:            append([]idhubResource(nil), s.Sinks...),
 		CreatedAt:        s.CreatedAt.Format(time.RFC3339),
 		UpdatedAt:        s.UpdatedAt.Format(time.RFC3339),
 	}
@@ -363,10 +384,18 @@ func (s *idhubAuthSession) runBrowserConnect() {
 		return
 	}
 
-	if err := s.fetchSources(context.Background()); err != nil {
-		s.setConnected("Connected to IDHub. Source loading failed, but you can retry.", err.Error())
-	} else {
-		s.setConnected("Connected to IDHub. Sources are ready.", "")
+	sourceErr := s.fetchSources(context.Background())
+	sinkErr := s.fetchSinks(context.Background())
+
+	switch {
+	case sourceErr == nil && sinkErr == nil:
+		s.setConnected("Connected to IDHub. Sources and targets are ready.", "")
+	case sourceErr != nil && sinkErr != nil:
+		s.setConnected("Connected to IDHub. Source and target loading failed, but you can retry.", joinErrorMessages(sourceErr, sinkErr))
+	case sourceErr != nil:
+		s.setConnected("Connected to IDHub. Sources failed to load, but targets are ready.", sourceErr.Error())
+	default:
+		s.setConnected("Connected to IDHub. Targets failed to load, but sources are ready.", sinkErr.Error())
 	}
 
 	s.closeBrowserResources()
@@ -505,6 +534,8 @@ func (s *idhubAuthSession) observeResponse(rawURL string, body []byte) error {
 		return s.applyClientMetadata(body)
 	case strings.Contains(rawURL, "/v1/tenants/") && strings.Contains(rawURL, "/sources"):
 		return s.applySourceList(body)
+	case strings.Contains(rawURL, "/v1/tenants/") && strings.Contains(rawURL, "/sinks"):
+		return s.applySinkList(body)
 	default:
 		return nil
 	}
@@ -514,6 +545,17 @@ func (s *idhubAuthSession) ready() bool {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return s.AccessToken != "" && s.TenantID != "" && s.IDHubAPIBase != ""
+}
+
+func joinErrorMessages(errs ...error) string {
+	parts := make([]string, 0, len(errs))
+	for _, err := range errs {
+		if err == nil {
+			continue
+		}
+		parts = append(parts, err.Error())
+	}
+	return strings.Join(parts, "; ")
 }
 
 func (s *idhubAuthSession) setProgress(state, message string) {
@@ -693,8 +735,8 @@ func (s *idhubAuthSession) applyTokenResponse(body []byte) error {
 	return nil
 }
 
-func (s *idhubAuthSession) applySourceList(body []byte) error {
-	var payload idhubSourceList
+func (s *idhubAuthSession) applyResourceList(body []byte, assign func([]idhubResource)) error {
+	var payload idhubResourceList
 	if err := json.Unmarshal(body, &payload); err != nil {
 		return nil
 	}
@@ -702,10 +744,22 @@ func (s *idhubAuthSession) applySourceList(body []byte) error {
 		return nil
 	}
 	s.mu.Lock()
-	s.Sources = append([]idhubResource(nil), payload.Data...)
+	assign(payload.Data)
 	s.UpdatedAt = time.Now()
 	s.mu.Unlock()
 	return nil
+}
+
+func (s *idhubAuthSession) applySourceList(body []byte) error {
+	return s.applyResourceList(body, func(data []idhubResource) {
+		s.Sources = append([]idhubResource(nil), data...)
+	})
+}
+
+func (s *idhubAuthSession) applySinkList(body []byte) error {
+	return s.applyResourceList(body, func(data []idhubResource) {
+		s.Sinks = append([]idhubResource(nil), data...)
+	})
 }
 
 func (s *idhubAuthSession) proxyContext(ctx context.Context) (idhubProxyContext, error) {
@@ -773,12 +827,12 @@ func (s *idhubAuthSession) ensureFreshToken(ctx context.Context) error {
 	return nil
 }
 
-func (s *idhubAuthSession) fetchSources(ctx context.Context) error {
+func (s *idhubAuthSession) fetchResources(ctx context.Context, collection, label string, apply func([]idhubResource)) error {
 	proxy, err := s.proxyContext(ctx)
 	if err != nil {
 		return err
 	}
-	upstream := fmt.Sprintf("%s/v1/tenants/%s/sources", proxy.Base, url.PathEscape(proxy.Tenant))
+	upstream := fmt.Sprintf("%s/v1/tenants/%s/%s", proxy.Base, url.PathEscape(proxy.Tenant), collection)
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, upstream, nil)
 	if err != nil {
 		return err
@@ -788,7 +842,7 @@ func (s *idhubAuthSession) fetchSources(ctx context.Context) error {
 
 	resp, err := (&http.Client{Timeout: 30 * time.Second}).Do(req)
 	if err != nil {
-		return fmt.Errorf("failed to load IDHub sources: %w", err)
+		return fmt.Errorf("failed to load IDHub %s: %w", label, err)
 	}
 	defer resp.Body.Close()
 	body, _ := io.ReadAll(resp.Body)
@@ -797,12 +851,24 @@ func (s *idhubAuthSession) fetchSources(ctx context.Context) error {
 		if msg == "" {
 			msg = resp.Status
 		}
-		return fmt.Errorf("failed to load IDHub sources: %s", msg)
+		return fmt.Errorf("failed to load IDHub %s: %s", label, msg)
 	}
-	if err := s.applySourceList(body); err != nil {
+	if err := s.applyResourceList(body, apply); err != nil {
 		return err
 	}
 	return nil
+}
+
+func (s *idhubAuthSession) fetchSources(ctx context.Context) error {
+	return s.fetchResources(ctx, "sources", "sources", func(data []idhubResource) {
+		s.Sources = append([]idhubResource(nil), data...)
+	})
+}
+
+func (s *idhubAuthSession) fetchSinks(ctx context.Context) error {
+	return s.fetchResources(ctx, "sinks", "targets", func(data []idhubResource) {
+		s.Sinks = append([]idhubResource(nil), data...)
+	})
 }
 
 func (s *idhubAuthSession) closeBrowserResources() {
