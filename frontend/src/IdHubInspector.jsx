@@ -28,7 +28,9 @@ function toSummary(obj) {
   if (typeof obj.connectionInfo === "string") {
     try {
       s.connection = JSON.parse(obj.connectionInfo);
-    } catch {}
+    } catch {
+      // Leave malformed connection strings out of the summary.
+    }
   } else if (obj.connectionInfo && typeof obj.connectionInfo === "object") {
     s.connection = obj.connectionInfo;
   }

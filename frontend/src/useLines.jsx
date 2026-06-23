@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect, useCallback, useLayoutEffect } from "react";
-import { PAGE, WINDOW_MAX, HALF_WIN, ROW, HANDLE, SPEED } from "./constants";
+import { PAGE, BYTE_PAGE, WINDOW_MAX, HALF_WIN, ROW, HANDLE, SPEED } from "./constants";
 
 const TOP_REBASE_TRIGGER = 1;
 const BOTTOM_REBASE_TRIGGER = HALF_WIN;
@@ -42,6 +42,10 @@ export default function useLines(path, virt) {
   const [tick, setTick] = useState(0);
   const [error, setError] = useState("");
   const [scrollVersion, setScrollVersion] = useState(0);
+  const [fileMode, setFileMode] = useState("line");
+  const [fileSize, setFileSize] = useState(0);
+  const [chunkSize, setChunkSize] = useState(0);
+  const pageSize = fileMode === "byte" ? BYTE_PAGE : PAGE;
 
   const cache = useRef(new Map());
   const pending = useRef(new Set());
@@ -241,7 +245,7 @@ export default function useLines(path, virt) {
 
   const fetchPage = useCallback(
     (p) => {
-      const start = p * PAGE;
+      const start = p * pageSize;
       if (start < 0 || start >= lineCount) return;
       if (cache.current.has(p) || pending.current.has(p)) return;
 
@@ -249,7 +253,7 @@ export default function useLines(path, virt) {
       const ctrl = new AbortController();
       pageCtrls.current.set(p, ctrl);
 
-      fetch(`/api/chunk?start=${start}&count=${PAGE}`, { signal: ctrl.signal })
+      fetch(`/api/chunk?start=${start}&count=${pageSize}`, { signal: ctrl.signal })
         .then((r) => (r.ok ? r.json() : Promise.reject()))
         .then((lines) => {
           if (ctrl.signal.aborted) return;
@@ -262,18 +266,18 @@ export default function useLines(path, virt) {
           pageCtrls.current.delete(p);
         });
     },
-    [lineCount, scheduleRefresh],
+    [lineCount, pageSize, scheduleRefresh],
   );
 
   const ensure = useCallback(
     (fromAbs, toAbs) => {
-      const fromPage = Math.floor(fromAbs / PAGE) - BUFFER_PAGES;
-      const toPage = Math.floor(toAbs / PAGE) + BUFFER_PAGES;
+      const fromPage = Math.floor(fromAbs / pageSize) - BUFFER_PAGES;
+      const toPage = Math.floor(toAbs / pageSize) + BUFFER_PAGES;
       for (let p = fromPage; p <= toPage; p += 1) {
         if (p >= 0) fetchPage(p);
       }
     },
-    [fetchPage],
+    [fetchPage, pageSize],
   );
 
   useEffect(() => {
@@ -296,6 +300,9 @@ export default function useLines(path, virt) {
     setReady(false);
     setError("");
     setLineCount(0);
+    setFileMode("line");
+    setFileSize(0);
+    setChunkSize(0);
     setTick((t) => t + 1);
 
     if (!path) return undefined;
@@ -309,13 +316,18 @@ export default function useLines(path, virt) {
         if (ctrl.signal.aborted) return undefined;
 
         const total = d.Lines || 0;
+        const nextMode = d.Mode === "byte" ? "byte" : "line";
+        const nextPageSize = nextMode === "byte" ? BYTE_PAGE : PAGE;
         const nextCount = Math.min(WINDOW_MAX, Math.max(0, total));
 
+        setFileMode(nextMode);
+        setFileSize(d.Size || 0);
+        setChunkSize(d.ChunkSize || 0);
         updateWindowState(0, nextCount);
         setLineCount(total);
         setTick((t) => t + 1);
 
-        return fetch(`/api/chunk?start=0&count=${PAGE}`, {
+        return fetch(`/api/chunk?start=0&count=${nextPageSize}`, {
           signal: ctrl.signal,
         });
       })
@@ -342,11 +354,11 @@ export default function useLines(path, virt) {
     (i) => {
       const absoluteIndex = base + i;
       if (absoluteIndex >= lineCount) return "";
-      const page = Math.floor(absoluteIndex / PAGE);
-      const offset = absoluteIndex % PAGE;
+      const page = Math.floor(absoluteIndex / pageSize);
+      const offset = absoluteIndex % pageSize;
       return cache.current.get(page)?.[offset] ?? "...";
     },
-    [base, lineCount],
+    [base, lineCount, pageSize],
   );
 
   const pinCurrentWindowEdge = useCallback(
@@ -521,6 +533,8 @@ export default function useLines(path, virt) {
     boxRef,
     count: lineCount,
     error,
+    fileMode,
+    fileSize,
     getLine,
     goBottom,
     goLine,
@@ -536,5 +550,6 @@ export default function useLines(path, virt) {
     trackRef,
     windowBase: base,
     windowCount,
+    chunkSize,
   };
 }

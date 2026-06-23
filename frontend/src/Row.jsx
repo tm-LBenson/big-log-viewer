@@ -43,6 +43,7 @@ export default function Row({ i }) {
     regex,
     caseSensitive,
     htmlLight,
+    streamMode,
   } = useSearch();
 
   const num = useMemo(() => {
@@ -53,20 +54,21 @@ export default function Row({ i }) {
   const line = getLine(i) || "";
 
   const html = useMemo(() => {
+    const renderRaw = raw || streamMode;
     let v = line;
-    if (raw) v = escapeHtml(v);
+    if (renderRaw) v = escapeHtml(v);
 
-    if (!hl) return htmlLight ? v : stripColors(v);
+    if (!hl) return htmlLight || renderRaw ? v : stripColors(v);
 
     const isCur = matches[cur] === abs(i);
-    if (!isCur) return htmlLight ? v : stripColors(v);
+    if (!isCur) return htmlLight || renderRaw ? v : stripColors(v);
 
     if (hlMode === "line") {
-      const body = htmlLight ? v : stripColors(v);
+      const body = htmlLight || renderRaw ? v : stripColors(v);
       return `<span class="hl-line">${body}</span>`;
     }
 
-    const source = htmlLight ? v : stripColors(v);
+    const source = htmlLight || renderRaw ? v : stripColors(v);
     if (!q) return source;
     const flags = caseSensitive ? "g" : "gi";
     const re = regex ? new RegExp(q, flags) : new RegExp(escRe(q), flags);
@@ -84,6 +86,7 @@ export default function Row({ i }) {
     abs,
     i,
     htmlLight,
+    streamMode,
   ]);
 
   return (

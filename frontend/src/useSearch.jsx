@@ -15,6 +15,7 @@ const fallback = {
   regex: false,
   caseSensitive: false,
   htmlLight: false,
+  streamMode: false,
   colors: { hover: "#eef2f7", line: "#cfe3ff", mark: "#7dd3fc" },
   controls: null,
   lineBar: null,

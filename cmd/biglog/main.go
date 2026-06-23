@@ -268,7 +268,12 @@ func openFile(w http.ResponseWriter, r *http.Request) {
 	}
 	current = f
 	mu.Unlock()
-	writeJSON(w, struct{ Lines int }{f.Lines})
+	writeJSON(w, struct {
+		Lines     int    `json:"Lines"`
+		Size      int64  `json:"Size"`
+		Mode      string `json:"Mode"`
+		ChunkSize int64  `json:"ChunkSize,omitempty"`
+	}{f.Lines, f.Size, f.Mode, f.ChunkSize})
 }
 
 func chunk(w http.ResponseWriter, r *http.Request) {

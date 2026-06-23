@@ -2,7 +2,7 @@ import { useEffect, useRef, useState, useLayoutEffect } from "react";
 import { createPortal } from "react-dom";
 import SearchCtx from "./SearchContext";
 import useSettings from "./useSettings";
-import { PAGE } from "./constants";
+import { PAGE, BYTE_PAGE } from "./constants";
 
 function parseUserTs(s) {
   if (!s) return NaN;
@@ -51,6 +51,7 @@ export default function SearchProvider({
   abs,
   getLine,
   count,
+  fileMode = "line",
   children,
 }) {
   const s = useSettings().get();
@@ -60,6 +61,9 @@ export default function SearchProvider({
   const [wrap, setWrap] = useState(!!s.wrap);
   const [lineNums, setLineNums] = useState(false);
   const htmlLight = !!s.htmlLight;
+  const streamMode = fileMode === "byte";
+  const pageSize = streamMode ? BYTE_PAGE : PAGE;
+  const unitLabel = streamMode ? "chunk" : "line";
 
   const colors = {
     hover: s.hoverColorLight || "#eef2f7",
@@ -96,7 +100,9 @@ export default function SearchProvider({
       if (!r.ok) return;
       const d = await r.json();
       if (typeof d.Total === "number") setTotalMatches(d.Total);
-    } catch {}
+    } catch {
+      // Ignore total-count failures; the visible match list is still useful.
+    }
   };
 
   const run = (query) => {
@@ -171,7 +177,8 @@ export default function SearchProvider({
       );
       const container = document.createElement("div");
       container.style.whiteSpace = "pre";
-      container.innerHTML = html;
+      if (streamMode) container.textContent = html;
+      else container.innerHTML = html;
       const text = container.innerText;
       if (navigator.clipboard && window.ClipboardItem) {
         const item = new ClipboardItem({
@@ -190,12 +197,14 @@ export default function SearchProvider({
         document.execCommand("copy");
         document.body.removeChild(ta);
       }
-    } catch {}
+    } catch {
+      // Clipboard support varies by browser shell.
+    }
   };
 
   const downloadRange = () => {
     const { s: start, e: end } = clampRange();
-    const name = `lines_${start}-${end}.html`;
+    const name = `${streamMode ? "chunks" : "lines"}_${start}-${end}.html`;
     const url = `/api/range?start=${
       start - 1
     }&end=${end}&download=1&name=${encodeURIComponent(name)}`;
@@ -203,8 +212,8 @@ export default function SearchProvider({
   };
 
   async function fetchChunk(page, signal) {
-    const start = page * PAGE;
-    const r = await fetch(`/api/chunk?start=${start}&count=${PAGE}`, {
+    const start = page * pageSize;
+    const r = await fetch(`/api/chunk?start=${start}&count=${pageSize}`, {
       signal,
     });
     if (!r.ok) throw new Error("chunk");
@@ -236,14 +245,14 @@ export default function SearchProvider({
       lines,
       firstTs,
       lastTs,
-      firstAbs: page * PAGE + firstIdx,
-      lastAbs: page * PAGE + lastIdx,
+      firstAbs: page * pageSize + firstIdx,
+      lastAbs: page * pageSize + lastIdx,
     };
   }
   async function goToTimestamp(input) {
     const target = parseUserTs(input);
     if (Number.isNaN(target) || !count) return;
-    const lastPage = Math.max(0, Math.floor((count - 1) / PAGE));
+    const lastPage = Math.max(0, Math.floor((count - 1) / pageSize));
     const ctrl = new AbortController();
     const a = await getBounds(0, ctrl.signal);
     const b = await getBounds(lastPage, ctrl.signal);
@@ -278,11 +287,11 @@ export default function SearchProvider({
         lo = mid + 1;
         continue;
       }
-      let idx = m.firstAbs ?? mid * PAGE;
+      let idx = m.firstAbs ?? mid * pageSize;
       for (let i = 0; i < m.lines.length; i++) {
         const t = parseLineTs(m.lines[i]);
         if (!Number.isNaN(t) && t >= target) {
-          idx = mid * PAGE + i;
+          idx = mid * pageSize + i;
           break;
         }
       }
@@ -362,7 +371,9 @@ export default function SearchProvider({
         </button>
 
         <span style={{ fontSize: 12, color: "var(--text-weak)" }}>
-          {totalMatches > matches.length
+          {searching
+            ? "searching..."
+            : totalMatches > matches.length
             ? `${matches.length} / ${totalMatches}`
             : `${totalMatches} matches`}
         </span>
@@ -450,11 +461,11 @@ export default function SearchProvider({
   const lineBar = (
     <div className="subbar-inner">
       <div className="group">
-        <span className="label">Go to line</span>
+        <span className="label">Go to {unitLabel}</span>
         <input
           className="field"
           type="number"
-          placeholder={count ? `1..${count}` : "line…"}
+          placeholder={count ? `1..${count}` : `${unitLabel}...`}
           value={lineJump}
           min={1}
           max={count || undefined}
@@ -546,6 +557,7 @@ export default function SearchProvider({
         regex,
         caseSensitive,
         htmlLight,
+        streamMode,
         colors,
         controls,
         lineBar,
