@@ -1,7 +1,9 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 
 const WINDOW_BYTES = 1 << 20;
 const SEARCH_BYTES = 256 << 20;
+const SEARCH_CONTEXT_BYTES = 64 << 10;
+const EDGE_TOLERANCE = 4;
 
 function formatBytes(value) {
   const n = Number(value || 0);
@@ -32,17 +34,29 @@ export default function HugeLogViewer({ path, fileSize }) {
   const [searchMore, setSearchMore] = useState(false);
   const [searchNextOffset, setSearchNextOffset] = useState(0);
   const [notice, setNotice] = useState("");
+  const [dragProgress, setDragProgress] = useState(null);
   const loadCtrl = useRef(null);
   const searchCtrl = useRef(null);
+  const scrollRef = useRef(null);
+  const activeRowRef = useRef(null);
+  const pendingScrollRef = useRef("top");
+  const jumpRailRef = useRef(null);
 
   const size = windowData?.size || fileSize || 0;
   const progress = size ? Math.min(100, (offset / size) * 100) : 0;
-  const activeOffset = searchIndex >= 0 ? searchItems[searchIndex]?.offset : null;
+  const currentPage = size ? Math.floor(offset / WINDOW_BYTES) + 1 : 0;
+  const totalPages = size ? Math.max(1, Math.ceil(size / WINDOW_BYTES)) : 0;
+  const thumbProgress = dragProgress ?? progress;
+  const activeItem = searchIndex >= 0 ? searchItems[searchIndex] : null;
+  const activeOffset = activeItem?.offset ?? null;
+  const activeText = activeItem?.text || "";
 
-  const loadWindow = useCallback(async (nextOffset, align = true) => {
+  const loadWindow = useCallback(async (nextOffset, options = {}) => {
+    const { align = false, scroll = "top" } = options;
     loadCtrl.current?.abort();
     const ctrl = new AbortController();
     loadCtrl.current = ctrl;
+    pendingScrollRef.current = scroll;
     setLoading(true);
     setError("");
     try {
@@ -76,21 +90,42 @@ export default function HugeLogViewer({ path, fileSize }) {
     setSearchMore(false);
     setSearchNextOffset(0);
     setNotice("");
-    if (path) loadWindow(0, false);
+    if (path) loadWindow(0, { scroll: "top" });
     return () => {
       loadCtrl.current?.abort();
       searchCtrl.current?.abort();
     };
   }, [loadWindow, path]);
 
+  useLayoutEffect(() => {
+    const scroller = scrollRef.current;
+    if (!scroller || !windowData) return;
+
+    const placement = pendingScrollRef.current || "top";
+    pendingScrollRef.current = "top";
+    if (placement === "bottom") {
+      scroller.scrollTop = Math.max(0, scroller.scrollHeight - scroller.clientHeight);
+      return;
+    }
+    if (placement === "match" && activeRowRef.current) {
+      const target =
+        activeRowRef.current.offsetTop - Math.max(0, scroller.clientHeight * 0.35);
+      scroller.scrollTop = Math.max(0, target);
+      return;
+    }
+    scroller.scrollTop = 0;
+  }, [activeOffset, activeText, windowData]);
+
   const selectSearchItem = useCallback(
     (items, index) => {
       const item = items[index];
       if (!item) return;
       setSearchIndex(index);
-      loadWindow(item.offset, false);
+      loadWindow(clampOffset(item.offset - SEARCH_CONTEXT_BYTES, size), {
+        scroll: "match",
+      });
     },
-    [loadWindow],
+    [loadWindow, size],
   );
 
   const runSearch = useCallback(
@@ -153,6 +188,80 @@ export default function HugeLogViewer({ path, fileSize }) {
     if (searchIndex > 0) selectSearchItem(searchItems, searchIndex - 1);
   };
 
+  const loadPreviousSection = useCallback(() => {
+    const prev = windowData?.prevOffset ?? offset - WINDOW_BYTES;
+    loadWindow(clampOffset(prev, size), { scroll: "bottom" });
+  }, [loadWindow, offset, size, windowData]);
+
+  const loadNextSection = useCallback(() => {
+    const next = windowData?.nextOffset ?? offset + WINDOW_BYTES;
+    loadWindow(clampOffset(next, size), { scroll: "top" });
+  }, [loadWindow, offset, size, windowData]);
+
+  const handleWheel = useCallback(
+    (event) => {
+      const scroller = scrollRef.current;
+      if (!scroller || loading || !windowData) return;
+
+      const atTop = scroller.scrollTop <= EDGE_TOLERANCE;
+      const atBottom =
+        scroller.scrollHeight - scroller.clientHeight - scroller.scrollTop <= EDGE_TOLERANCE;
+      if (event.deltaY < 0 && atTop && offset > 0) {
+        event.preventDefault();
+        loadPreviousSection();
+      } else if (event.deltaY > 0 && atBottom && windowData.truncated) {
+        event.preventDefault();
+        loadNextSection();
+      }
+    },
+    [loadNextSection, loadPreviousSection, loading, offset, windowData],
+  );
+
+  const clientYToJumpRatio = useCallback((clientY) => {
+    const rail = jumpRailRef.current;
+    if (!rail) return 0;
+    const rect = rail.getBoundingClientRect();
+    return Math.max(0, Math.min(1, (clientY - rect.top) / Math.max(1, rect.height)));
+  }, []);
+
+  const jumpToClientY = useCallback(
+    (clientY) => {
+      if (!size) return;
+      const ratio = clientYToJumpRatio(clientY);
+      const target = Math.round(ratio * Math.max(0, size - WINDOW_BYTES));
+      loadWindow(clampOffset(target, size), { scroll: "top" });
+    },
+    [clientYToJumpRatio, loadWindow, size],
+  );
+
+  const previewJump = useCallback(
+    (clientY) => {
+      setDragProgress(clientYToJumpRatio(clientY) * 100);
+    },
+    [clientYToJumpRatio],
+  );
+
+  const startJumpDrag = useCallback(
+    (event) => {
+      event.preventDefault();
+      const move = (moveEvent) => previewJump(moveEvent.clientY);
+      const up = (upEvent) => {
+        setDragProgress(null);
+        jumpToClientY(upEvent.clientY);
+        window.removeEventListener("pointermove", move);
+        window.removeEventListener("pointerup", up);
+      };
+      window.addEventListener("pointermove", move);
+      window.addEventListener("pointerup", up);
+      previewJump(event.clientY);
+    },
+    [jumpToClientY, previewJump],
+  );
+
+  const setActiveRow = useCallback((node) => {
+    activeRowRef.current = node;
+  }, []);
+
   const lines = useMemo(() => windowData?.lines || [], [windowData]);
   const matchLabel =
     searchIndex >= 0
@@ -164,12 +273,12 @@ export default function HugeLogViewer({ path, fileSize }) {
   return (
     <main className="viewer huge-viewer">
       <nav className="toolbar huge-toolbar">
-        <button className="btn btn--icon" onClick={() => loadWindow(0, false)} title="Top">
+        <button className="btn btn--icon" onClick={() => loadWindow(0)} title="Top">
           T
         </button>
         <button
           className="btn btn--icon"
-          onClick={() => loadWindow(windowData?.prevOffset || 0, true)}
+          onClick={loadPreviousSection}
           disabled={!windowData || offset <= 0}
           title="Previous section"
         >
@@ -177,7 +286,7 @@ export default function HugeLogViewer({ path, fileSize }) {
         </button>
         <button
           className="btn btn--icon"
-          onClick={() => loadWindow(windowData?.nextOffset || offset, false)}
+          onClick={loadNextSection}
           disabled={!windowData || !windowData.truncated}
           title="Next section"
         >
@@ -185,7 +294,7 @@ export default function HugeLogViewer({ path, fileSize }) {
         </button>
         <button
           className="btn btn--icon"
-          onClick={() => loadWindow(Math.max(0, size - WINDOW_BYTES), true)}
+          onClick={() => loadWindow(Math.max(0, size - WINDOW_BYTES))}
           disabled={!size}
           title="Bottom"
         >
@@ -221,6 +330,7 @@ export default function HugeLogViewer({ path, fileSize }) {
 
       <div className="huge-status">
         <span>Huge stream mode</span>
+        <span>Section {currentPage} / {totalPages}</span>
         <span>{formatBytes(offset)} / {formatBytes(size)}</span>
         <span>{progress.toFixed(2)}%</span>
         {notice ? <span>{notice}</span> : null}
@@ -228,20 +338,43 @@ export default function HugeLogViewer({ path, fileSize }) {
 
       {error ? <div className="idhub-banner">{error}</div> : null}
 
-      <div className="huge-log-scroll">
-        {loading && !lines.length ? (
-          <div className="viewer center huge-loading">loading section...</div>
-        ) : (
-          lines.map((line, index) => (
-            <div
-              key={`${line.offset}-${index}`}
-              className={`huge-log-row${line.offset === activeOffset ? " is-match" : ""}`}
-            >
-              <span className="huge-log-offset">{formatBytes(line.offset)}</span>
-              <span className="huge-log-text">{line.text}</span>
-            </div>
-          ))
-        )}
+      <div className="huge-log-area">
+        <div
+          ref={scrollRef}
+          className="huge-log-scroll"
+          onWheel={handleWheel}
+        >
+          {loading && !lines.length ? (
+            <div className="viewer center huge-loading">loading section...</div>
+          ) : (
+            lines.map((line, index) => {
+              const isActive = activeText
+                ? line.text === activeText
+                : activeOffset != null && line.offset === activeOffset;
+              return (
+                <div
+                  key={`${line.offset}-${index}`}
+                  ref={isActive ? setActiveRow : undefined}
+                  className={`huge-log-row${isActive ? " is-match" : ""}`}
+                >
+                  <span className="huge-log-offset">{formatBytes(line.offset)}</span>
+                  <span className="huge-log-text">{line.text}</span>
+                </div>
+              );
+            })
+          )}
+        </div>
+        <div
+          ref={jumpRailRef}
+          className="huge-jump-rail"
+          onPointerDown={startJumpDrag}
+          title="Drag to jump through the file"
+        >
+          <div
+            className="huge-jump-thumb"
+            style={{ top: `${thumbProgress}%` }}
+          />
+        </div>
       </div>
     </main>
   );

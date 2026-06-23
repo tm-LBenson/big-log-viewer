@@ -55,3 +55,42 @@ func TestReadTextWindowCleansHugeHTMLLog(t *testing.T) {
 		t.Fatalf("window did not include later log text: %q", joined)
 	}
 }
+
+func TestHugeSearchRowsKeepNearMatchOffsets(t *testing.T) {
+	entry := `<font color="blue">2026/06/23 10:00:00 INFO Processing account output &amp; checkpoint</font>`
+	needle := `<font color="red">2026/06/23 10:00:01 ERROR Needle failed here &amp; decoded</font>`
+	raw := "<html><body><pre>" + strings.Repeat(entry, 20000) + needle + "</pre></body></html>"
+	path := filepath.Join(t.TempDir(), "huge.html")
+	if err := os.WriteFile(path, []byte(raw), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	handle, err := os.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer handle.Close()
+
+	f := &indexer.File{
+		Path: path,
+		File: handle,
+		Size: int64(len(raw)),
+		Mode: indexer.ModeByte,
+	}
+
+	rows, _, _, err := scanCleanRows(f, 0, f.Size, 1, func(_ []byte, text string) bool {
+		return strings.Contains(text, "Needle failed here")
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("expected one search row, got %d", len(rows))
+	}
+	needleAt := int64(strings.Index(raw, "Needle failed here"))
+	if rows[0].Offset <= 0 || rows[0].Offset > needleAt {
+		t.Fatalf("row offset %d should be before needle at %d", rows[0].Offset, needleAt)
+	}
+	if delta := needleAt - rows[0].Offset; delta > 256 {
+		t.Fatalf("row offset %d is too far from needle at %d", rows[0].Offset, needleAt)
+	}
+}

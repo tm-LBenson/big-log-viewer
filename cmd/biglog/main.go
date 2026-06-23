@@ -533,16 +533,11 @@ func scanCleanRows(f *indexer.File, offset, limit int64, maxRows int, keep func(
 			raw = raw[:0]
 			return
 		}
-		cleaned := cleanLogText(string(raw))
-		for _, part := range strings.Split(cleaned, "\n") {
-			part = strings.TrimRight(part, " \t\r")
-			if strings.TrimSpace(part) == "" {
+		for _, row := range cleanLogRows(raw, lineOffset) {
+			if keep != nil && !keep(raw, row.Text) {
 				continue
 			}
-			if keep != nil && !keep(raw, part) {
-				continue
-			}
-			rows = append(rows, textWindowLine{Offset: lineOffset, Text: part})
+			rows = append(rows, row)
 			if len(rows) >= maxRows {
 				break
 			}
@@ -580,6 +575,38 @@ func scanCleanRows(f *indexer.File, offset, limit int64, maxRows int, keep func(
 	}
 
 	return rows, current, current < f.Size, nil
+}
+
+func cleanLogRows(raw []byte, baseOffset int64) []textWindowLine {
+	s := string(raw)
+	rows := make([]textWindowLine, 0, 16)
+	appendSegment := func(segment string, offset int64) {
+		cleaned := cleanLogText(segment)
+		for _, part := range strings.Split(cleaned, "\n") {
+			part = strings.TrimRight(part, " \t\r")
+			if strings.TrimSpace(part) == "" {
+				continue
+			}
+			rows = append(rows, textWindowLine{Offset: offset, Text: part})
+		}
+	}
+
+	matches := htmlBreakRe.FindAllStringIndex(s, -1)
+	if len(matches) == 0 {
+		appendSegment(s, baseOffset)
+		return rows
+	}
+
+	start := 0
+	for _, match := range matches {
+		end := match[1]
+		appendSegment(s[start:end], baseOffset+int64(start))
+		start = end
+	}
+	if start < len(s) {
+		appendSegment(s[start:], baseOffset+int64(start))
+	}
+	return rows
 }
 
 func cleanLogText(s string) string {

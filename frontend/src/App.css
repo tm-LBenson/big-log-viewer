@@ -385,14 +385,24 @@ body.modal-open .menu {
   overflow: hidden;
 }
 .huge-log-scroll {
+  position: relative;
+  height: 100%;
   flex: 1;
   min-height: 0;
   overflow: auto;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
   background: #fff;
   color: #111827;
   font-family: var(--mono);
   font-size: 12px;
   line-height: 1.45;
+  padding-right: 18px;
+}
+.huge-log-area {
+  position: relative;
+  flex: 1;
+  min-height: 0;
 }
 .huge-log-row {
   display: grid;
@@ -419,6 +429,31 @@ body.modal-open .menu {
 }
 .huge-loading {
   height: 100%;
+}
+.huge-jump-rail {
+  position: absolute;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  width: 18px;
+  border-left: 1px solid rgba(17, 24, 39, 0.12);
+  background: rgba(15, 31, 51, 0.08);
+  cursor: pointer;
+  user-select: none;
+}
+.huge-jump-thumb {
+  position: absolute;
+  left: 3px;
+  width: 12px;
+  height: 42px;
+  transform: translateY(-50%);
+  border-radius: 6px;
+  border: 1px solid rgba(15, 31, 51, 0.35);
+  background: rgba(31, 122, 234, 0.75);
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.25);
+}
+.huge-jump-rail:hover .huge-jump-thumb {
+  background: rgba(31, 122, 234, 0.95);
 }
 
 .resizer {
