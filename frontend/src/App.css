@@ -389,6 +389,7 @@ body.modal-open .menu {
   height: 100%;
   flex: 1;
   min-height: 0;
+  min-width: 0;
   overflow: auto;
   overscroll-behavior: contain;
   scrollbar-gutter: stable;
@@ -397,12 +398,12 @@ body.modal-open .menu {
   font-family: var(--mono);
   font-size: 12px;
   line-height: 1.45;
-  padding-right: 18px;
 }
 .huge-log-area {
-  position: relative;
+  display: flex;
   flex: 1;
   min-height: 0;
+  min-width: 0;
 }
 .huge-log-row {
   display: grid;
@@ -430,20 +431,18 @@ body.modal-open .menu {
 .huge-loading {
   height: 100%;
 }
-.huge-jump-rail {
-  position: absolute;
-  top: 0;
-  right: 0;
-  bottom: 0;
-  width: 18px;
+.huge-joystick-rail {
+  position: relative;
+  flex: 0 0 22px;
   border-left: 1px solid rgba(17, 24, 39, 0.12);
   background: rgba(15, 31, 51, 0.08);
-  cursor: pointer;
+  cursor: ns-resize;
   user-select: none;
 }
-.huge-jump-thumb {
+.huge-joystick-handle {
   position: absolute;
-  left: 3px;
+  top: 50%;
+  left: 4px;
   width: 12px;
   height: 42px;
   transform: translateY(-50%);
@@ -451,8 +450,9 @@ body.modal-open .menu {
   border: 1px solid rgba(15, 31, 51, 0.35);
   background: rgba(31, 122, 234, 0.75);
   box-shadow: 0 1px 4px rgba(0, 0, 0, 0.25);
+  cursor: grab;
 }
-.huge-jump-rail:hover .huge-jump-thumb {
+.huge-joystick-rail:hover .huge-joystick-handle {
   background: rgba(31, 122, 234, 0.95);
 }
 
