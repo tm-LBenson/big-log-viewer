@@ -364,7 +364,8 @@ func textWindow(w http.ResponseWriter, r *http.Request) {
 		limit = hugeMaxWindowBytes
 	}
 	align := r.URL.Query().Get("align") != "0"
-	resp, err := readTextWindow(f, offset, limit, align)
+	tail := r.URL.Query().Get("tail") == "1"
+	resp, err := readTextWindow(f, offset, limit, align, tail)
 	mu.RUnlock()
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -447,12 +448,15 @@ var (
 	htmlTagRe    = regexp.MustCompile(`(?s)<[^>]*>`)
 )
 
-func readTextWindow(f *indexer.File, offset, limit int64, align bool) (textWindowResp, error) {
+func readTextWindow(f *indexer.File, offset, limit int64, align bool, tail bool) (textWindowResp, error) {
 	start := clampInt64(offset, 0, f.Size)
+	if tail {
+		start = clampInt64(start-limit, 0, f.Size)
+	}
 	if align {
 		start = lineStartAtOrBefore(f, start)
 	}
-	lines, next, truncated, err := scanCleanRows(f, start, limit, hugeWindowMaxRows, nil)
+	lines, next, truncated, err := scanCleanRows(f, start, limit, hugeWindowMaxRows, nil, tail)
 	if err != nil {
 		return textWindowResp{}, err
 	}
@@ -487,7 +491,7 @@ func searchHugeFile(r *http.Request, f *indexer.File, q string, limit int) (huge
 	items := make([]hugeSearchItem, 0, limit)
 	lines, next, truncated, err := scanCleanRows(f, offset, maxBytes, limit, func(_ []byte, text string) bool {
 		return strings.Contains(strings.ToLower(text), needle)
-	})
+	}, false)
 	if err != nil {
 		return hugeSearchResp{}, err
 	}
@@ -509,7 +513,7 @@ func searchHugeFile(r *http.Request, f *indexer.File, q string, limit int) (huge
 	}, nil
 }
 
-func scanCleanRows(f *indexer.File, offset, limit int64, maxRows int, keep func([]byte, string) bool) ([]textWindowLine, int64, bool, error) {
+func scanCleanRows(f *indexer.File, offset, limit int64, maxRows int, keep func([]byte, string) bool, tail bool) ([]textWindowLine, int64, bool, error) {
 	if offset >= f.Size {
 		return []textWindowLine{}, f.Size, false, nil
 	}
@@ -529,7 +533,7 @@ func scanCleanRows(f *indexer.File, offset, limit int64, maxRows int, keep func(
 	raw := make([]byte, 0, 16<<10)
 
 	flush := func() {
-		if len(raw) == 0 || len(rows) >= maxRows {
+		if len(raw) == 0 || (!tail && len(rows) >= maxRows) {
 			raw = raw[:0]
 			return
 		}
@@ -538,14 +542,18 @@ func scanCleanRows(f *indexer.File, offset, limit int64, maxRows int, keep func(
 				continue
 			}
 			rows = append(rows, row)
-			if len(rows) >= maxRows {
+			if tail && len(rows) > maxRows {
+				copy(rows, rows[len(rows)-maxRows:])
+				rows = rows[:maxRows]
+			}
+			if !tail && len(rows) >= maxRows {
 				break
 			}
 		}
 		raw = raw[:0]
 	}
 
-	for current-offset < readLimit && len(rows) < maxRows {
+	for current-offset < readLimit && (tail || len(rows) < maxRows) {
 		part, err := r.ReadSlice('\n')
 		if len(part) > 0 {
 			raw = append(raw, part...)

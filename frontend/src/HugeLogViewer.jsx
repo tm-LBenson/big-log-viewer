@@ -4,8 +4,6 @@ const WINDOW_BYTES = 1 << 20;
 const SEARCH_BYTES = 256 << 20;
 const SEARCH_CONTEXT_BYTES = 64 << 10;
 const EDGE_TOLERANCE = 4;
-const JOYSTICK_HANDLE = 42;
-const JOYSTICK_SPEED = 1800;
 
 function formatBytes(value) {
   const n = Number(value || 0);
@@ -41,16 +39,6 @@ export default function HugeLogViewer({ path, fileSize }) {
   const scrollRef = useRef(null);
   const activeRowRef = useRef(null);
   const pendingScrollRef = useRef("top");
-  const navRailRef = useRef(null);
-  const navHandleRef = useRef(null);
-  const navDeltaRef = useRef(0);
-  const navRangeRef = useRef(1);
-  const navFrameRef = useRef(0);
-  const navLastRef = useRef(0);
-  const pageCooldownRef = useRef(false);
-  const loadingRef = useRef(false);
-  const windowDataRef = useRef(null);
-  const offsetRef = useRef(0);
 
   const size = windowData?.size || fileSize || 0;
   const progress = size ? Math.min(100, (offset / size) * 100) : 0;
@@ -75,12 +63,8 @@ export default function HugeLogViewer({ path, fileSize }) {
     return bestIndex;
   }, [activeOffset, activeText, lines]);
 
-  loadingRef.current = loading;
-  windowDataRef.current = windowData;
-  offsetRef.current = offset;
-
   const loadWindow = useCallback(async (nextOffset, options = {}) => {
-    const { align = false, scroll = "top" } = options;
+    const { align = false, scroll = "top", tail = false } = options;
     loadCtrl.current?.abort();
     const ctrl = new AbortController();
     loadCtrl.current = ctrl;
@@ -93,6 +77,7 @@ export default function HugeLogViewer({ path, fileSize }) {
         limit: String(WINDOW_BYTES),
         align: align ? "1" : "0",
       });
+      if (tail) params.set("tail", "1");
       const response = await fetch(`/api/window?${params.toString()}`, {
         signal: ctrl.signal,
       });
@@ -122,7 +107,6 @@ export default function HugeLogViewer({ path, fileSize }) {
     return () => {
       loadCtrl.current?.abort();
       searchCtrl.current?.abort();
-      window.cancelAnimationFrame(navFrameRef.current);
     };
   }, [loadWindow, path]);
 
@@ -227,23 +211,6 @@ export default function HugeLogViewer({ path, fileSize }) {
     loadWindow(clampOffset(next, size), { scroll: "top" });
   }, [loadWindow, offset, size, windowData]);
 
-  const pageByDirection = useCallback(
-    (direction) => {
-      if (loadingRef.current || pageCooldownRef.current) return;
-      pageCooldownRef.current = true;
-      window.setTimeout(() => {
-        pageCooldownRef.current = false;
-      }, 350);
-
-      if (direction < 0 && offsetRef.current > 0) {
-        loadPreviousSection();
-      } else if (direction > 0 && windowDataRef.current?.truncated) {
-        loadNextSection();
-      }
-    },
-    [loadNextSection, loadPreviousSection],
-  );
-
   const handleWheel = useCallback(
     (event) => {
       const scroller = scrollRef.current;
@@ -261,69 +228,6 @@ export default function HugeLogViewer({ path, fileSize }) {
       }
     },
     [loadNextSection, loadPreviousSection, loading, offset, windowData],
-  );
-
-  const animateJoystick = useCallback(
-    (timestamp) => {
-      if (!navLastRef.current) navLastRef.current = timestamp;
-      const dt = (timestamp - navLastRef.current) / 1000;
-      navLastRef.current = timestamp;
-
-      const scroller = scrollRef.current;
-      const range = Math.max(1, navRangeRef.current);
-      const ratio = navDeltaRef.current / range;
-      const pixels = ratio * JOYSTICK_SPEED * dt;
-
-      if (scroller && Math.abs(pixels) > 0.1) {
-        scroller.scrollTop += pixels;
-        const atTop = scroller.scrollTop <= EDGE_TOLERANCE;
-        const atBottom =
-          scroller.scrollHeight - scroller.clientHeight - scroller.scrollTop <=
-          EDGE_TOLERANCE;
-        if (pixels < 0 && atTop) {
-          pageByDirection(-1);
-        } else if (pixels > 0 && atBottom) {
-          pageByDirection(1);
-        }
-      }
-
-      navFrameRef.current = window.requestAnimationFrame(animateJoystick);
-    },
-    [pageByDirection],
-  );
-
-  const startJoystickDrag = useCallback(
-    (event) => {
-      event.preventDefault();
-      const rail = navRailRef.current;
-      const handle = navHandleRef.current;
-      if (!rail || !handle) return;
-
-      const rect = rail.getBoundingClientRect();
-      const mid = rect.top + rect.height / 2;
-      const range = Math.max(1, (rect.height - JOYSTICK_HANDLE) / 2);
-      navRangeRef.current = range;
-      navLastRef.current = 0;
-
-      const move = (moveEvent) => {
-        const delta = Math.max(-range, Math.min(range, moveEvent.clientY - mid));
-        navDeltaRef.current = delta;
-        handle.style.top = `calc(50% + ${delta}px)`;
-      };
-      const up = () => {
-        navDeltaRef.current = 0;
-        handle.style.top = "50%";
-        window.cancelAnimationFrame(navFrameRef.current);
-        navLastRef.current = 0;
-        window.removeEventListener("pointermove", move);
-        window.removeEventListener("pointerup", up);
-      };
-      window.addEventListener("pointermove", move);
-      window.addEventListener("pointerup", up);
-      move(event);
-      navFrameRef.current = window.requestAnimationFrame(animateJoystick);
-    },
-    [animateJoystick],
   );
 
   const setActiveRow = useCallback((node) => {
@@ -361,7 +265,7 @@ export default function HugeLogViewer({ path, fileSize }) {
         </button>
         <button
           className="btn btn--icon"
-          onClick={() => loadWindow(Math.max(0, size - WINDOW_BYTES))}
+          onClick={() => loadWindow(size, { scroll: "bottom", tail: true })}
           disabled={!size}
           title="Bottom"
         >
@@ -428,17 +332,6 @@ export default function HugeLogViewer({ path, fileSize }) {
               );
             })
           )}
-        </div>
-        <div
-          ref={navRailRef}
-          className="huge-joystick-rail"
-          onPointerDown={startJoystickDrag}
-          title="Drag up or down to scroll; hold near an edge to page"
-        >
-          <div
-            ref={navHandleRef}
-            className="huge-joystick-handle"
-          />
         </div>
       </div>
     </main>

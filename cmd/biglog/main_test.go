@@ -33,7 +33,7 @@ func TestReadTextWindowCleansHugeHTMLLog(t *testing.T) {
 		Mode: indexer.ModeByte,
 	}
 
-	window, err := readTextWindow(f, 0, 1024, false)
+	window, err := readTextWindow(f, 0, 1024, false, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -79,7 +79,7 @@ func TestHugeSearchRowsKeepNearMatchOffsets(t *testing.T) {
 
 	rows, _, _, err := scanCleanRows(f, 0, f.Size, 1, func(_ []byte, text string) bool {
 		return strings.Contains(text, "Needle failed here")
-	})
+	}, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -92,5 +92,42 @@ func TestHugeSearchRowsKeepNearMatchOffsets(t *testing.T) {
 	}
 	if delta := needleAt - rows[0].Offset; delta > 256 {
 		t.Fatalf("row offset %d is too far from needle at %d", rows[0].Offset, needleAt)
+	}
+}
+
+func TestReadTextWindowTailKeepsEndRows(t *testing.T) {
+	entry := `<font color="blue">2026/06/23 10:00:00 INFO Processing account output &amp; checkpoint</font>`
+	tail := `<font color="green">2026/06/23 10:00:02 INFO Tail marker at end &amp; decoded</font>`
+	raw := "<html><body><pre>" + strings.Repeat(entry, hugeWindowMaxRows+500) + tail + "</pre></body></html>"
+	path := filepath.Join(t.TempDir(), "tail.html")
+	if err := os.WriteFile(path, []byte(raw), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	handle, err := os.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer handle.Close()
+
+	f := &indexer.File{
+		Path: path,
+		File: handle,
+		Size: int64(len(raw)),
+		Mode: indexer.ModeByte,
+	}
+
+	window, err := readTextWindow(f, f.Size, f.Size, false, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(window.Lines) != hugeWindowMaxRows {
+		t.Fatalf("expected capped tail rows, got %d", len(window.Lines))
+	}
+	joined := ""
+	for _, line := range window.Lines[len(window.Lines)-10:] {
+		joined += line.Text + "\n"
+	}
+	if !strings.Contains(joined, "Tail marker at end & decoded") {
+		t.Fatalf("tail window did not keep the final row: %q", joined)
 	}
 }

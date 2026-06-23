@@ -400,7 +400,6 @@ body.modal-open .menu {
   line-height: 1.45;
 }
 .huge-log-area {
-  display: flex;
   flex: 1;
   min-height: 0;
   min-width: 0;
@@ -431,31 +430,6 @@ body.modal-open .menu {
 .huge-loading {
   height: 100%;
 }
-.huge-joystick-rail {
-  position: relative;
-  flex: 0 0 22px;
-  border-left: 1px solid rgba(17, 24, 39, 0.12);
-  background: rgba(15, 31, 51, 0.08);
-  cursor: ns-resize;
-  user-select: none;
-}
-.huge-joystick-handle {
-  position: absolute;
-  top: 50%;
-  left: 4px;
-  width: 12px;
-  height: 42px;
-  transform: translateY(-50%);
-  border-radius: 6px;
-  border: 1px solid rgba(15, 31, 51, 0.35);
-  background: rgba(31, 122, 234, 0.75);
-  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.25);
-  cursor: grab;
-}
-.huge-joystick-rail:hover .huge-joystick-handle {
-  background: rgba(31, 122, 234, 0.95);
-}
-
 .resizer {
   background: var(--border);
   cursor: col-resize;
