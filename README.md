@@ -54,7 +54,7 @@ The script will:
 
 ## Running the Application
 
-1. Double-click to launch the **biglog** application.
+1. Double-click to launch the **biglog.exe** application on Windows, or **biglog** on macOS.
 2. Open your browser and go to [http://localhost:8844](http://localhost:8844) to access the log viewer UI.
 
 ---
@@ -85,10 +85,13 @@ Once running, **Big-Log Viewer** operates via a command-line interface. To exit,
 
 If you prefer to build the application yourself:
 
-```bash
+```powershell
 git clone https://github.com/tm-LBenson/big-log-viewer.git
 cd big-log-viewer
-go build -o biglog ./cmd/biglog
+$version = (Get-Content package.json | ConvertFrom-Json).version
+go build -ldflags "-X main.appVersion=$version" -o biglog.exe ./cmd/biglog
 ```
+
+On macOS, use `-o biglog` instead of `-o biglog.exe`.
 
 _Frontend assets are embedded in the binary; no additional files are required._

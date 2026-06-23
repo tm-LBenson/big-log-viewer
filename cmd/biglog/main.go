@@ -1,12 +1,14 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"embed"
 	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
+	htmlstd "html"
 	"io"
 	"io/fs"
 	"log"
@@ -16,6 +18,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -24,6 +27,11 @@ import (
 )
 
 const defaultRoot = "./logs"
+const hugeWindowBytes int64 = 1 << 20
+const hugeMaxWindowBytes int64 = 8 << 20
+const hugeMaxLineBytes int64 = 2 << 20
+const hugeWindowMaxRows = 2500
+const hugeSearchBytes int64 = 256 << 20
 
 var (
 	rootDir string
@@ -62,6 +70,7 @@ func main() {
 	http.HandleFunc("/api/list", listDir)
 	http.HandleFunc("/api/open", openFile)
 	http.HandleFunc("/api/chunk", chunk)
+	http.HandleFunc("/api/window", textWindow)
 	http.HandleFunc("/api/raw", raw)
 	http.HandleFunc("/api/search", searchLines)
 	http.HandleFunc("/api/root", getRoot)
@@ -83,7 +92,7 @@ func main() {
 	srv := &http.Server{
 		Addr:         *addr,
 		ReadTimeout:  15 * time.Second,
-		WriteTimeout: 30 * time.Second,
+		WriteTimeout: 5 * time.Minute,
 		IdleTimeout:  60 * time.Second,
 		Handler:      nil,
 	}
@@ -303,6 +312,67 @@ func chunk(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, lines)
 }
 
+type textWindowLine struct {
+	Offset int64  `json:"offset"`
+	Text   string `json:"text"`
+}
+
+type textWindowResp struct {
+	Offset     int64            `json:"offset"`
+	PrevOffset int64            `json:"prevOffset"`
+	NextOffset int64            `json:"nextOffset"`
+	Size       int64            `json:"size"`
+	Limit      int64            `json:"limit"`
+	Lines      []textWindowLine `json:"lines"`
+	Truncated  bool             `json:"truncated"`
+}
+
+type hugeSearchItem struct {
+	Offset int64  `json:"offset"`
+	Text   string `json:"text"`
+}
+
+type hugeSearchResp struct {
+	Matches      []int            `json:"Matches"`
+	Offsets      []int64          `json:"Offsets"`
+	Items        []hugeSearchItem `json:"Items"`
+	ScannedBytes int64            `json:"ScannedBytes"`
+	NextOffset   int64            `json:"NextOffset"`
+	More         bool             `json:"More"`
+}
+
+func textWindow(w http.ResponseWriter, r *http.Request) {
+	mu.RLock()
+	f := current
+	if f == nil {
+		mu.RUnlock()
+		http.Error(w, "no file", http.StatusBadRequest)
+		return
+	}
+	if f.Mode != indexer.ModeByte {
+		mu.RUnlock()
+		http.Error(w, "window mode is only available for huge files", http.StatusBadRequest)
+		return
+	}
+
+	offset := clampInt64(atoi64(r.URL.Query().Get("offset")), 0, f.Size)
+	limit := atoi64(r.URL.Query().Get("limit"))
+	if limit <= 0 {
+		limit = hugeWindowBytes
+	}
+	if limit > hugeMaxWindowBytes {
+		limit = hugeMaxWindowBytes
+	}
+	align := r.URL.Query().Get("align") != "0"
+	resp, err := readTextWindow(f, offset, limit, align)
+	mu.RUnlock()
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, resp)
+}
+
 func raw(w http.ResponseWriter, r *http.Request) {
 	path := r.URL.Query().Get("path")
 	if path == "" {
@@ -339,6 +409,16 @@ func searchLines(w http.ResponseWriter, r *http.Request) {
 	if limit <= 0 {
 		limit = 500
 	}
+	if f.Mode == indexer.ModeByte {
+		resp, err := searchHugeFile(r, f, q, limit)
+		mu.RUnlock()
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		writeJSON(w, resp)
+		return
+	}
 	needle := bytes.ToLower([]byte(q))
 	matches := make([]int, 0, limit)
 	for g := 0; g*indexer.Group < f.Lines && len(matches) < limit; g++ {
@@ -358,6 +438,197 @@ func searchLines(w http.ResponseWriter, r *http.Request) {
 	}
 	mu.RUnlock()
 	writeJSON(w, struct{ Matches []int }{matches})
+}
+
+var (
+	htmlScriptRe = regexp.MustCompile(`(?is)<script[^>]*>.*?</script>`)
+	htmlStyleRe  = regexp.MustCompile(`(?is)<style[^>]*>.*?</style>`)
+	htmlBreakRe  = regexp.MustCompile(`(?i)<br\s*/?>|</(?:p|div|tr|li|h[1-6]|font)>`)
+	htmlTagRe    = regexp.MustCompile(`(?s)<[^>]*>`)
+)
+
+func readTextWindow(f *indexer.File, offset, limit int64, align bool) (textWindowResp, error) {
+	start := clampInt64(offset, 0, f.Size)
+	if align {
+		start = lineStartAtOrBefore(f, start)
+	}
+	lines, next, truncated, err := scanCleanRows(f, start, limit, hugeWindowMaxRows, nil)
+	if err != nil {
+		return textWindowResp{}, err
+	}
+	if next <= start && start < f.Size {
+		next = clampInt64(start+limit, 0, f.Size)
+	}
+	return textWindowResp{
+		Offset:     start,
+		PrevOffset: clampInt64(start-limit, 0, f.Size),
+		NextOffset: clampInt64(next, 0, f.Size),
+		Size:       f.Size,
+		Limit:      limit,
+		Lines:      lines,
+		Truncated:  truncated,
+	}, nil
+}
+
+func searchHugeFile(r *http.Request, f *indexer.File, q string, limit int) (hugeSearchResp, error) {
+	if limit <= 0 || limit > 500 {
+		limit = 100
+	}
+	offset := lineStartAtOrBefore(f, clampInt64(atoi64(r.URL.Query().Get("offset")), 0, f.Size))
+	maxBytes := atoi64(r.URL.Query().Get("maxBytes"))
+	if maxBytes <= 0 {
+		maxBytes = hugeSearchBytes
+	}
+	if maxBytes > 2<<30 {
+		maxBytes = 2 << 30
+	}
+
+	needle := strings.ToLower(q)
+	items := make([]hugeSearchItem, 0, limit)
+	lines, next, truncated, err := scanCleanRows(f, offset, maxBytes, limit, func(_ []byte, text string) bool {
+		return strings.Contains(strings.ToLower(text), needle)
+	})
+	if err != nil {
+		return hugeSearchResp{}, err
+	}
+	offsets := make([]int64, 0, len(lines))
+	for _, line := range lines {
+		items = append(items, hugeSearchItem{
+			Offset: line.Offset,
+			Text:   line.Text,
+		})
+		offsets = append(offsets, line.Offset)
+	}
+	return hugeSearchResp{
+		Matches:      []int{},
+		Offsets:      offsets,
+		Items:        items,
+		ScannedBytes: next - offset,
+		NextOffset:   clampInt64(next, 0, f.Size),
+		More:         truncated && next < f.Size,
+	}, nil
+}
+
+func scanCleanRows(f *indexer.File, offset, limit int64, maxRows int, keep func([]byte, string) bool) ([]textWindowLine, int64, bool, error) {
+	if offset >= f.Size {
+		return []textWindowLine{}, f.Size, false, nil
+	}
+	readLimit := limit + hugeMaxLineBytes
+	if readLimit < limit {
+		readLimit = limit
+	}
+	if remaining := f.Size - offset; readLimit > remaining {
+		readLimit = remaining
+	}
+
+	sr := io.NewSectionReader(f.File, offset, readLimit)
+	r := bufio.NewReaderSize(sr, 1<<20)
+	rows := make([]textWindowLine, 0, 512)
+	current := offset
+	lineOffset := offset
+	raw := make([]byte, 0, 16<<10)
+
+	flush := func() {
+		if len(raw) == 0 || len(rows) >= maxRows {
+			raw = raw[:0]
+			return
+		}
+		cleaned := cleanLogText(string(raw))
+		for _, part := range strings.Split(cleaned, "\n") {
+			part = strings.TrimRight(part, " \t\r")
+			if strings.TrimSpace(part) == "" {
+				continue
+			}
+			if keep != nil && !keep(raw, part) {
+				continue
+			}
+			rows = append(rows, textWindowLine{Offset: lineOffset, Text: part})
+			if len(rows) >= maxRows {
+				break
+			}
+		}
+		raw = raw[:0]
+	}
+
+	for current-offset < readLimit && len(rows) < maxRows {
+		part, err := r.ReadSlice('\n')
+		if len(part) > 0 {
+			raw = append(raw, part...)
+			current += int64(len(part))
+		}
+		if err == bufio.ErrBufferFull {
+			if len(raw) >= 64<<10 {
+				flush()
+				lineOffset = current
+				if current-offset >= limit {
+					break
+				}
+			}
+			continue
+		}
+		if err != nil && err != io.EOF {
+			return nil, current, false, err
+		}
+		flush()
+		lineOffset = current
+		if err == io.EOF || current-offset >= limit {
+			break
+		}
+	}
+	if len(raw) > 0 && len(rows) < maxRows {
+		flush()
+	}
+
+	return rows, current, current < f.Size, nil
+}
+
+func cleanLogText(s string) string {
+	s = strings.ReplaceAll(s, "\x00", "")
+	s = strings.TrimPrefix(s, "\ufeff")
+	s = strings.TrimPrefix(s, "\u00ef\u00bb\u00bf")
+	s = htmlScriptRe.ReplaceAllString(s, " ")
+	s = htmlStyleRe.ReplaceAllString(s, " ")
+	s = htmlBreakRe.ReplaceAllString(s, "\n")
+	s = htmlTagRe.ReplaceAllString(s, "")
+	s = htmlstd.UnescapeString(s)
+	s = strings.ReplaceAll(s, "\r\n", "\n")
+	s = strings.ReplaceAll(s, "\r", "\n")
+	return s
+}
+
+func lineStartAtOrBefore(f *indexer.File, offset int64) int64 {
+	if offset <= 0 {
+		return 0
+	}
+	if offset > f.Size {
+		offset = f.Size
+	}
+	pos := offset
+	searched := int64(0)
+	buf := make([]byte, 64<<10)
+	for pos > 0 && searched < hugeMaxLineBytes {
+		n := int64(len(buf))
+		if pos < n {
+			n = pos
+		}
+		if remaining := hugeMaxLineBytes - searched; remaining < n {
+			n = remaining
+		}
+		start := pos - n
+		readBuf := buf[:int(n)]
+		_, err := f.File.ReadAt(readBuf, start)
+		if err != nil && err != io.EOF {
+			return offset
+		}
+		for i := len(readBuf) - 1; i >= 0; i-- {
+			if readBuf[i] == '\n' {
+				return start + int64(i) + 1
+			}
+		}
+		pos = start
+		searched += n
+	}
+	return pos
 }
 
 func getRoot(w http.ResponseWriter, r *http.Request) {
@@ -440,6 +711,21 @@ func writeJSON(w http.ResponseWriter, v any) {
 func atoi(s string) int {
 	var n int
 	fmt.Sscanf(s, "%d", &n)
+	return n
+}
+
+func atoi64(s string) int64 {
+	n, _ := strconv.ParseInt(strings.TrimSpace(s), 10, 64)
+	return n
+}
+
+func clampInt64(n, min, max int64) int64 {
+	if n < min {
+		return min
+	}
+	if n > max {
+		return max
+	}
 	return n
 }
 

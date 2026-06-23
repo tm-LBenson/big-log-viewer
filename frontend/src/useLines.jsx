@@ -327,6 +327,8 @@ export default function useLines(path, virt) {
         setLineCount(total);
         setTick((t) => t + 1);
 
+        if (nextMode === "byte") return null;
+
         return fetch(`/api/chunk?start=0&count=${nextPageSize}`, {
           signal: ctrl.signal,
         });

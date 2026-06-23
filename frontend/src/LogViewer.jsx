@@ -2,6 +2,7 @@ import { useRef } from "react";
 import useLines from "./useLines";
 import SearchProvider from "./SearchProvider";
 import Viewer from "./Viewer";
+import HugeLogViewer from "./HugeLogViewer";
 
 export default function LogViewer({ path }) {
   const virt = useRef(null);
@@ -10,6 +11,14 @@ export default function LogViewer({ path }) {
   if (!path) return <main className="viewer center">select a log</main>;
   if (lines.error) return <main className="viewer center">{lines.error}</main>;
   if (!lines.ready) return <main className="viewer center">loading...</main>;
+  if (lines.fileMode === "byte") {
+    return (
+      <HugeLogViewer
+        path={path}
+        fileSize={lines.fileSize}
+      />
+    );
+  }
 
   return (
     <SearchProvider
