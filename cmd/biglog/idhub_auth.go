@@ -539,7 +539,10 @@ func (s *idhubAuthSession) launchDefaultProfileBrowser(port int) error {
 	if err != nil {
 		return err
 	}
-	cmd, err := launchBrowserWithDefaultProfile(browserPath, port)
+	if defaultProfileBrowserIsRunning(browserPath) {
+		return existingChromeDevToolsError(port)
+	}
+	cmd, err := launchBrowserWithDefaultProfile(browserPath, port, s.StartURL)
 	if err != nil {
 		return err
 	}
@@ -1272,7 +1275,7 @@ func launchBrowser(browserPath string, port int, userDir string) (*exec.Cmd, err
 	return cmd, nil
 }
 
-func launchBrowserWithDefaultProfile(browserPath string, port int) (*exec.Cmd, error) {
+func launchBrowserWithDefaultProfile(browserPath string, port int, startURL string) (*exec.Cmd, error) {
 	args := []string{
 		fmt.Sprintf("--remote-debugging-port=%d", port),
 		"--remote-debugging-address=127.0.0.1",
@@ -1280,7 +1283,7 @@ func launchBrowserWithDefaultProfile(browserPath string, port int) (*exec.Cmd, e
 		"--no-default-browser-check",
 		"--new-window",
 		"--window-size=1280,900",
-		"about:blank",
+		startURL,
 	}
 	if runtime.GOOS == "linux" && os.Geteuid() == 0 {
 		args = append(args, "--no-sandbox")
@@ -1292,8 +1295,60 @@ func launchBrowserWithDefaultProfile(browserPath string, port int) (*exec.Cmd, e
 	return cmd, nil
 }
 
+func defaultProfileBrowserIsRunning(browserPath string) bool {
+	name := browserProcessName(browserPath)
+	if name == "" {
+		return false
+	}
+	switch runtime.GOOS {
+	case "windows":
+		image := name
+		if filepath.Ext(image) == "" {
+			image += ".exe"
+		}
+		out, err := exec.Command("tasklist", "/FI", "IMAGENAME eq "+image, "/NH").Output()
+		if err != nil {
+			return false
+		}
+		return strings.Contains(strings.ToLower(string(out)), strings.ToLower(image))
+	case "darwin":
+		return exec.Command("pgrep", "-x", name).Run() == nil
+	default:
+		return exec.Command("pgrep", "-x", name).Run() == nil
+	}
+}
+
+func browserProcessName(browserPath string) string {
+	base := strings.ToLower(strings.TrimSuffix(filepath.Base(browserPath), filepath.Ext(browserPath)))
+	switch {
+	case strings.Contains(base, "msedge") || strings.Contains(base, "microsoft-edge"):
+		if runtime.GOOS == "darwin" {
+			return "Microsoft Edge"
+		}
+		if runtime.GOOS == "windows" {
+			return "msedge"
+		}
+		return "microsoft-edge"
+	case strings.Contains(base, "chromium"):
+		if runtime.GOOS == "darwin" {
+			return "Chromium"
+		}
+		return "chromium"
+	case strings.Contains(base, "chrome") || strings.Contains(base, "google-chrome"):
+		if runtime.GOOS == "darwin" {
+			return "Google Chrome"
+		}
+		if runtime.GOOS == "windows" {
+			return "chrome"
+		}
+		return "google-chrome"
+	default:
+		return base
+	}
+}
+
 func existingChromeDevToolsError(port int) error {
-	return fmt.Errorf("no Chrome or Edge DevTools session was found at 127.0.0.1:%d. If Chrome is already open, close it completely and click Use Chrome session again, or start it with `%s`", port, chromeRemoteDebugCommand(port))
+	return fmt.Errorf("no Chrome or Edge DevTools session was found at 127.0.0.1:%d. Close Chrome completely and click Use Chrome session again, or start Chrome yourself with `%s`", port, chromeRemoteDebugCommand(port))
 }
 
 func chromeRemoteDebugCommand(port int) string {
