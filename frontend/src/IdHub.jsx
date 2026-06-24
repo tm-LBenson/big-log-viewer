@@ -13,7 +13,6 @@ const SOURCE_KIND = "source";
 const TARGET_KIND = "target";
 const BROWSER_MODE_ISOLATED = "isolated";
 const BROWSER_MODE_EXISTING = "existing";
-const BROWSER_MODE_TOKEN = "token";
 
 function sortResources(items) {
   return [...items].sort((left, right) =>
@@ -132,9 +131,6 @@ function statusText({
       : "Connected to IDHub.";
   }
   if (CONNECTING_STATES.has(sessionState)) {
-    if (browserMode === BROWSER_MODE_TOKEN) {
-      return "Connecting with browser token.";
-    }
     if (browserMode === BROWSER_MODE_EXISTING) {
       return "Finish sign-in in Chrome.";
     }
@@ -198,9 +194,6 @@ export default function IdHub({ onOpenLog }) {
   const [loadingJobs, setLoadingJobs] = useState(false);
   const [connecting, setConnecting] = useState(false);
   const [connectMode, setConnectMode] = useState("");
-  const [tokenPanelOpen, setTokenPanelOpen] = useState(false);
-  const [tokenInput, setTokenInput] = useState("");
-  const [apiUrlInput, setApiUrlInput] = useState("");
 
   const bucket = useMemo(() => makeKey(tenantUrl, jobSelection), [tenantUrl, jobSelection]);
   const connected = Boolean(connectionInfo?.connected) || sessionState === "connected";
@@ -385,47 +378,6 @@ export default function IdHub({ onOpenLog }) {
     } catch (error) {
       setSessionState("error");
       setErrorMessage(error?.message || "Failed to start IDHub sign-in.");
-    } finally {
-      setConnecting(false);
-    }
-  };
-
-  const connectWithToken = async () => {
-    if (!tenantUrl.trim()) {
-      setErrorMessage("Enter a tenant URL first.");
-      return;
-    }
-    if (!tokenInput.trim()) {
-      setErrorMessage("Paste an Authorization header or bearer token first.");
-      return;
-    }
-    setConnecting(true);
-    setConnectMode(BROWSER_MODE_TOKEN);
-    setErrorMessage("");
-    setSessionState("launching");
-    setStatusMessage("Connecting with browser token...");
-    clearJobs();
-    try {
-      const response = await fetch("/api/idhub/connect/token", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          tenantUrl,
-          authorization: tokenInput,
-          apiUrl: apiUrlInput,
-        }),
-      });
-      const data = await parseResponse(response, "Failed to connect with browser token");
-      setSessionId(data?.id || "");
-      applyStatus(data);
-      if (data?.connected) {
-        setTokenInput("");
-        setApiUrlInput("");
-        setTokenPanelOpen(false);
-      }
-    } catch (error) {
-      setSessionState("error");
-      setErrorMessage(error?.message || "Failed to connect with browser token.");
     } finally {
       setConnecting(false);
     }
@@ -731,19 +683,9 @@ export default function IdHub({ onOpenLog }) {
               className="btn"
               onClick={() => startConnect(BROWSER_MODE_EXISTING)}
               disabled={!tenantUrl.trim() || connecting}
-              title="Reuse Chrome on localhost debug port 9222"
+              title="Open a reusable Chrome session for IDHub"
             >
               Use Chrome session
-            </button>
-          )}
-
-          {!connected && (
-            <button
-              className="btn"
-              onClick={() => setTokenPanelOpen((open) => !open)}
-              disabled={connecting}
-            >
-              Browser token
             </button>
           )}
 
@@ -774,42 +716,6 @@ export default function IdHub({ onOpenLog }) {
             </>
           )}
         </div>
-
-        {!connected && tokenPanelOpen && (
-          <div className="idhub-token-panel">
-            <label className="idhub-field-wrap">
-              <span className="idhub-field-label">Authorization header</span>
-              <textarea
-                className="field idhub-token-input"
-                value={tokenInput}
-                onChange={(event) => setTokenInput(event.target.value)}
-                placeholder="Authorization: Bearer ey..."
-                disabled={connecting}
-              />
-            </label>
-            <label className="idhub-field-wrap">
-              <span className="idhub-field-label">IDHub API request URL</span>
-              <input
-                className="field"
-                value={apiUrlInput}
-                onChange={(event) => setApiUrlInput(event.target.value.trim())}
-                placeholder="https://.../v1/tenants/.../sources"
-                disabled={connecting}
-              />
-            </label>
-            <div className="idhub-actions">
-              <button
-                className="btn btn--primary"
-                onClick={connectWithToken}
-                disabled={!tenantUrl.trim() || !tokenInput.trim() || connecting}
-              >
-                {connecting && activeBrowserMode === BROWSER_MODE_TOKEN
-                  ? "Connecting..."
-                  : "Connect with token"}
-              </button>
-            </div>
-          </div>
-        )}
       </div>
 
       {errorMessage && <div className="idhub-banner">{errorMessage}</div>}

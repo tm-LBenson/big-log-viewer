@@ -82,7 +82,6 @@ func main() {
 	http.HandleFunc("/api/update/check", updateCheckHandler)
 	http.HandleFunc("/api/update/apply", updateApplyHandler)
 	http.HandleFunc("/api/idhub/connect/start", idhubConnectStart)
-	http.HandleFunc("/api/idhub/connect/token", idhubConnectToken)
 	http.HandleFunc("/api/idhub/connect/status", idhubConnectStatus)
 	http.HandleFunc("/api/idhub/connect/disconnect", idhubConnectDisconnect)
 	http.HandleFunc("/api/idhub/sources", idhubSources)
