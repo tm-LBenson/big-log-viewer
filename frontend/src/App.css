@@ -749,6 +749,24 @@ body.modal-open .menu {
   flex-wrap: wrap;
 }
 
+.idhub-token-panel {
+  display: grid;
+  grid-template-columns: minmax(320px, 1.3fr) minmax(260px, 1fr);
+  gap: 12px;
+  align-items: end;
+  padding-top: 4px;
+}
+
+.idhub-token-panel .idhub-actions {
+  grid-column: 1 / -1;
+}
+
+.idhub-token-input {
+  min-height: 70px;
+  resize: vertical;
+  font-family: ui-monospace, SFMono-Regular, Consolas, "Liberation Mono", monospace;
+}
+
 .idhub-table-source {
   max-width: 260px;
   overflow: hidden;
@@ -769,6 +787,10 @@ body.modal-open .menu {
 
 @media (max-width: 900px) {
   .idhub-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .idhub-token-panel {
     grid-template-columns: 1fr;
   }
 }

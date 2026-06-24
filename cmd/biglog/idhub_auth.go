@@ -33,6 +33,7 @@ const (
 
 	idhubBrowserModeIsolated = "isolated"
 	idhubBrowserModeExisting = "existing"
+	idhubBrowserModeToken    = "token"
 	idhubDefaultDebugPort    = 9222
 )
 
@@ -107,6 +108,13 @@ type idhubConnectStartRequest struct {
 	TenantURL   string `json:"tenantUrl"`
 	BrowserMode string `json:"browserMode,omitempty"`
 	DebugPort   int    `json:"debugPort,omitempty"`
+}
+
+type idhubConnectTokenRequest struct {
+	TenantURL     string `json:"tenantUrl"`
+	APIURL        string `json:"apiUrl,omitempty"`
+	Authorization string `json:"authorization,omitempty"`
+	Token         string `json:"token,omitempty"`
 }
 
 type idhubBootstrapInfo struct {
@@ -205,6 +213,71 @@ func idhubConnectStart(w http.ResponseWriter, r *http.Request) {
 	idhubSessionsMu.Unlock()
 
 	go sess.runBrowserConnect()
+
+	writeJSON(w, sess.status())
+}
+
+func idhubConnectToken(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "POST only", http.StatusMethodNotAllowed)
+		return
+	}
+	defer r.Body.Close()
+
+	var req idhubConnectTokenRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "bad json", http.StatusBadRequest)
+		return
+	}
+
+	startURL, err := normalizeTenantURL(req.TenantURL)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	token, err := extractBearerToken(firstNonEmpty(req.Authorization, req.Token))
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	apiBase, tenantID, err := manualIDHubContext(startURL, req.APIURL)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	sess := &idhubAuthSession{
+		ID:             newOpaqueID(),
+		TenantURL:      startURL,
+		StartURL:       startURL,
+		BrowserMode:    idhubBrowserModeToken,
+		State:          "launching",
+		Message:        "Connecting to IDHub with pasted browser token...",
+		Connected:      false,
+		TenantID:       tenantID,
+		IDHubAPIBase:   apiBase,
+		AccessToken:    token,
+		AccessTokenExp: time.Now().Add(45 * time.Minute),
+		CreatedAt:      time.Now(),
+		UpdatedAt:      time.Now(),
+	}
+	idhubSessionsMu.Lock()
+	idhubSessions[sess.ID] = sess
+	idhubSessionsMu.Unlock()
+
+	sourceErr := sess.fetchSources(r.Context())
+	sinkErr := sess.fetchSinks(r.Context())
+
+	switch {
+	case sourceErr == nil && sinkErr == nil:
+		sess.setConnected("Connected to IDHub with browser token. Sources and targets are ready.", "")
+	case sourceErr != nil && sinkErr != nil:
+		sess.fail(fmt.Errorf("browser token did not load IDHub sources or targets: %s", joinErrorMessages(sourceErr, sinkErr)))
+	case sourceErr != nil:
+		sess.setConnected("Connected to IDHub with browser token. Sources failed to load, but targets are ready.", sourceErr.Error())
+	default:
+		sess.setConnected("Connected to IDHub with browser token. Targets failed to load, but sources are ready.", sinkErr.Error())
+	}
 
 	writeJSON(w, sess.status())
 }
@@ -1143,6 +1216,111 @@ func normalizeIDHubDebugPort(port int) (int, error) {
 		return 0, errors.New("debugPort must be between 1 and 65535")
 	}
 	return port, nil
+}
+
+func extractBearerToken(raw string) (string, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return "", errors.New("bearer token is required")
+	}
+	lower := strings.ToLower(raw)
+	idx := strings.Index(lower, "bearer ")
+	if idx >= 0 {
+		token := cleanBearerToken(raw[idx+7:])
+		if token == "" {
+			return "", errors.New("bearer token is required")
+		}
+		return token, nil
+	}
+	if strings.ContainsAny(raw, "\r\n\t ") {
+		return "", errors.New("paste an Authorization header or bearer token")
+	}
+	token := cleanBearerToken(raw)
+	if token == "" {
+		return "", errors.New("bearer token is required")
+	}
+	return token, nil
+}
+
+func cleanBearerToken(raw string) string {
+	raw = strings.TrimSpace(raw)
+	raw = strings.Trim(raw, "\"'`")
+	cutAt := len(raw)
+	for _, sep := range []string{"\r", "\n", "\t", " ", "\"", "'", "`", ",", ";"} {
+		if idx := strings.Index(raw, sep); idx >= 0 && idx < cutAt {
+			cutAt = idx
+		}
+	}
+	return strings.TrimSpace(raw[:cutAt])
+}
+
+func manualIDHubContext(tenantURL string, rawAPIURL string) (string, string, error) {
+	if apiURL := extractURLContaining(rawAPIURL, "/v1/tenants/"); apiURL != "" {
+		base, tenant := parseTenantAPIURL(apiURL)
+		if base != "" && tenant != "" {
+			return base, tenant, nil
+		}
+	}
+	if rawAPIURL = strings.TrimSpace(rawAPIURL); rawAPIURL != "" {
+		base, tenant := parseTenantAPIURL(rawAPIURL)
+		if base != "" && tenant != "" {
+			return base, tenant, nil
+		}
+	}
+	base, tenant := deriveIDHubContextFromTenantURL(tenantURL)
+	if base != "" && tenant != "" {
+		return base, tenant, nil
+	}
+	return "", "", errors.New("paste an IDHub API request URL containing /v1/tenants/<tenant>/, or use a tenant URL whose host starts with the tenant name")
+}
+
+func extractURLContaining(raw string, needle string) string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" || !strings.Contains(raw, needle) {
+		return ""
+	}
+	idx := strings.Index(raw, needle)
+	start := strings.LastIndex(raw[:idx], "http")
+	if start < 0 {
+		return ""
+	}
+	end := len(raw)
+	for _, sep := range []string{"\r", "\n", "\t", " ", "\"", "'", "`", ")", ">", ","} {
+		if pos := strings.Index(raw[start:], sep); pos >= 0 && start+pos < end {
+			end = start + pos
+		}
+	}
+	return strings.TrimSpace(raw[start:end])
+}
+
+func deriveIDHubContextFromTenantURL(tenantURL string) (string, string) {
+	u, err := url.Parse(tenantURL)
+	if err != nil || u.Host == "" {
+		return "", ""
+	}
+	host := u.Hostname()
+	labels := strings.Split(host, ".")
+	if len(labels) == 0 {
+		return "", ""
+	}
+	tenant := strings.TrimSpace(labels[0])
+	if strings.HasSuffix(strings.ToLower(tenant), "-idhub") {
+		tenant = tenant[:len(tenant)-len("-idhub")]
+	}
+	tenant = strings.TrimSpace(tenant)
+	if tenant == "" {
+		return "", ""
+	}
+	return strings.TrimRight(fmt.Sprintf("%s://%s", schemeFor(u.Scheme), u.Host), "/"), tenant
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return value
+		}
+	}
+	return ""
 }
 
 func parseTenantAPIURL(raw string) (string, string) {
