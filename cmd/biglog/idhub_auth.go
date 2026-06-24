@@ -27,8 +27,13 @@ import (
 )
 
 const (
-	idhubConnectTimeout = 10 * time.Minute
-	idhubRefreshSkew    = 30 * time.Second
+	idhubConnectTimeout         = 10 * time.Minute
+	idhubExistingBrowserTimeout = 5 * time.Second
+	idhubRefreshSkew            = 30 * time.Second
+
+	idhubBrowserModeIsolated = "isolated"
+	idhubBrowserModeExisting = "existing"
+	idhubDefaultDebugPort    = 9222
 )
 
 type idhubResource struct {
@@ -42,6 +47,8 @@ type idhubAuthSession struct {
 	TenantURL        string
 	StartURL         string
 	BrowserPath      string
+	BrowserMode      string
+	DebugPort        int
 	State            string
 	Message          string
 	LastError        string
@@ -61,12 +68,13 @@ type idhubAuthSession struct {
 	CreatedAt        time.Time
 	UpdatedAt        time.Time
 
-	mu              sync.RWMutex
-	cleanupOnce     sync.Once
-	browserCmd      *exec.Cmd
-	browserPort     int
-	browserTargetID string
-	browserUserDir  string
+	mu               sync.RWMutex
+	cleanupOnce      sync.Once
+	browserCmd       *exec.Cmd
+	browserPort      int
+	browserTargetID  string
+	browserTargetOwn bool
+	browserUserDir   string
 }
 
 type idhubStatusResponse struct {
@@ -78,6 +86,8 @@ type idhubStatusResponse struct {
 	TenantURL        string          `json:"tenantUrl,omitempty"`
 	StartURL         string          `json:"startUrl,omitempty"`
 	BrowserPath      string          `json:"browserPath,omitempty"`
+	BrowserMode      string          `json:"browserMode,omitempty"`
+	BrowserDebugPort int             `json:"browserDebugPort,omitempty"`
 	TenantID         string          `json:"tenantId,omitempty"`
 	IDHubAPIBase     string          `json:"idhubApiBase,omitempty"`
 	CatalogAPIBase   string          `json:"catalogApiBase,omitempty"`
@@ -94,7 +104,9 @@ type idhubStatusResponse struct {
 }
 
 type idhubConnectStartRequest struct {
-	TenantURL string `json:"tenantUrl"`
+	TenantURL   string `json:"tenantUrl"`
+	BrowserMode string `json:"browserMode,omitempty"`
+	DebugPort   int    `json:"debugPort,omitempty"`
 }
 
 type idhubBootstrapInfo struct {
@@ -161,14 +173,32 @@ func idhubConnectStart(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	browserMode, err := normalizeIDHubBrowserMode(req.BrowserMode)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	debugPort := 0
+	message := "Opening a browser window for RI / IDHub sign-in..."
+	if browserMode == idhubBrowserModeExisting {
+		debugPort, err = normalizeIDHubDebugPort(req.DebugPort)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		message = fmt.Sprintf("Looking for your Chrome session on port %d...", debugPort)
+	}
+
 	sess := &idhubAuthSession{
-		ID:        newOpaqueID(),
-		TenantURL: startURL,
-		StartURL:  startURL,
-		State:     "launching",
-		Message:   "Opening a browser window for RI / IDHub sign-in…",
-		CreatedAt: time.Now(),
-		UpdatedAt: time.Now(),
+		ID:          newOpaqueID(),
+		TenantURL:   startURL,
+		StartURL:    startURL,
+		BrowserMode: browserMode,
+		DebugPort:   debugPort,
+		State:       "launching",
+		Message:     message,
+		CreatedAt:   time.Now(),
+		UpdatedAt:   time.Now(),
 	}
 	idhubSessionsMu.Lock()
 	idhubSessions[sess.ID] = sess
@@ -278,6 +308,8 @@ func (s *idhubAuthSession) status() idhubStatusResponse {
 		TenantURL:        s.TenantURL,
 		StartURL:         s.StartURL,
 		BrowserPath:      s.BrowserPath,
+		BrowserMode:      s.BrowserMode,
+		BrowserDebugPort: s.DebugPort,
 		TenantID:         s.TenantID,
 		IDHubAPIBase:     s.IDHubAPIBase,
 		CatalogAPIBase:   s.CatalogAPIBase,
@@ -298,6 +330,11 @@ func (s *idhubAuthSession) status() idhubStatusResponse {
 }
 
 func (s *idhubAuthSession) runBrowserConnect() {
+	if s.BrowserMode == idhubBrowserModeExisting {
+		s.runExistingBrowserConnect()
+		return
+	}
+
 	ctx, cancel := context.WithTimeout(context.Background(), idhubConnectTimeout)
 	defer cancel()
 
@@ -353,6 +390,7 @@ func (s *idhubAuthSession) runBrowserConnect() {
 
 	s.mu.Lock()
 	s.browserTargetID = target.ID
+	s.browserTargetOwn = created
 	s.UpdatedAt = time.Now()
 	s.mu.Unlock()
 
@@ -399,6 +437,120 @@ func (s *idhubAuthSession) runBrowserConnect() {
 	}
 
 	s.closeBrowserResources()
+}
+
+func (s *idhubAuthSession) runExistingBrowserConnect() {
+	ctx, cancel := context.WithTimeout(context.Background(), idhubConnectTimeout)
+	defer cancel()
+
+	port := s.DebugPort
+	if port == 0 {
+		port = idhubDefaultDebugPort
+	}
+
+	s.mu.Lock()
+	s.BrowserPath = fmt.Sprintf("Chrome / Edge session on 127.0.0.1:%d", port)
+	s.browserPort = port
+	s.UpdatedAt = time.Now()
+	s.mu.Unlock()
+
+	s.setProgress("waiting_browser", fmt.Sprintf("Using your Chrome session on port %d. Finish RI / Okta auth in Chrome, then open IDHub if needed.", port))
+
+	attachCtx, attachCancel := context.WithTimeout(ctx, idhubExistingBrowserTimeout)
+	err := waitForDevTools(attachCtx, port)
+	attachCancel()
+	if err != nil {
+		s.setProgress("waiting_browser", fmt.Sprintf("Opening Chrome / Edge with your saved profile on port %d...", port))
+		if launchErr := s.launchDefaultProfileBrowser(port); launchErr != nil {
+			s.closeBrowserResources()
+			s.fail(fmt.Errorf("failed to open Chrome / Edge with your saved profile: %w", launchErr))
+			return
+		}
+		attachCtx, attachCancel = context.WithTimeout(ctx, idhubExistingBrowserTimeout)
+		err = waitForDevTools(attachCtx, port)
+		attachCancel()
+		if err != nil {
+			s.closeBrowserResources()
+			s.fail(existingChromeDevToolsError(port))
+			return
+		}
+	}
+
+	target, created, err := chooseDevToolsTarget(ctx, port, s.StartURL)
+	if err != nil {
+		s.closeBrowserResources()
+		s.fail(fmt.Errorf("failed to open the tenant URL in Chrome: %w", err))
+		return
+	}
+
+	s.mu.Lock()
+	s.browserTargetID = target.ID
+	s.browserTargetOwn = created
+	s.UpdatedAt = time.Now()
+	s.mu.Unlock()
+
+	cdp, err := newCDPClient(ctx, target.WebSocketDebuggerURL)
+	if err != nil {
+		s.closeBrowserResources()
+		s.fail(fmt.Errorf("failed to attach to the Chrome tab: %w", err))
+		return
+	}
+	defer cdp.Close()
+
+	if err := cdp.Call(ctx, "Page.enable", map[string]any{}, nil); err != nil {
+		s.closeBrowserResources()
+		s.fail(fmt.Errorf("failed to enable Chrome page events: %w", err))
+		return
+	}
+	if err := cdp.Call(ctx, "Network.enable", map[string]any{}, nil); err != nil {
+		s.closeBrowserResources()
+		s.fail(fmt.Errorf("failed to enable Chrome network events: %w", err))
+		return
+	}
+	if !created {
+		_ = cdp.Call(ctx, "Page.navigate", map[string]any{"url": s.StartURL}, nil)
+	}
+
+	if err := s.captureIDHubSession(ctx, cdp, nil); err != nil {
+		s.closeBrowserResources()
+		s.fail(err)
+		return
+	}
+
+	sourceErr := s.fetchSources(context.Background())
+	sinkErr := s.fetchSinks(context.Background())
+
+	switch {
+	case sourceErr == nil && sinkErr == nil:
+		s.setConnected("Connected to IDHub. Sources and targets are ready.", "")
+	case sourceErr != nil && sinkErr != nil:
+		s.setConnected("Connected to IDHub. Source and target loading failed, but you can retry.", joinErrorMessages(sourceErr, sinkErr))
+	case sourceErr != nil:
+		s.setConnected("Connected to IDHub. Sources failed to load, but targets are ready.", sourceErr.Error())
+	default:
+		s.setConnected("Connected to IDHub. Targets failed to load, but sources are ready.", sinkErr.Error())
+	}
+
+	s.closeBrowserResources()
+}
+
+func (s *idhubAuthSession) launchDefaultProfileBrowser(port int) error {
+	browserPath, err := findBrowserExecutable()
+	if err != nil {
+		return err
+	}
+	cmd, err := launchBrowserWithDefaultProfile(browserPath, port)
+	if err != nil {
+		return err
+	}
+	s.mu.Lock()
+	s.BrowserPath = browserPath
+	s.UpdatedAt = time.Now()
+	s.mu.Unlock()
+	go func() {
+		_ = cmd.Wait()
+	}()
+	return nil
 }
 
 type trackedRequest struct {
@@ -877,15 +1029,17 @@ func (s *idhubAuthSession) closeBrowserResources() {
 		cmd := s.browserCmd
 		port := s.browserPort
 		targetID := s.browserTargetID
+		targetOwn := s.browserTargetOwn
 		userDir := s.browserUserDir
 		s.browserCmd = nil
 		s.browserPort = 0
 		s.browserTargetID = ""
+		s.browserTargetOwn = false
 		s.browserUserDir = ""
 		s.UpdatedAt = time.Now()
 		s.mu.Unlock()
 
-		if port != 0 && targetID != "" {
+		if port != 0 && targetID != "" && targetOwn {
 			_, _ = http.Get(fmt.Sprintf("http://127.0.0.1:%d/json/close/%s", port, url.PathEscape(targetID)))
 		}
 		if cmd != nil && cmd.Process != nil {
@@ -967,6 +1121,27 @@ func normalizeTenantURL(raw string) (string, error) {
 	return strings.TrimRight(u.String(), "/"), nil
 }
 
+func normalizeIDHubBrowserMode(raw string) (string, error) {
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case "", idhubBrowserModeIsolated:
+		return idhubBrowserModeIsolated, nil
+	case idhubBrowserModeExisting, "chrome", "current":
+		return idhubBrowserModeExisting, nil
+	default:
+		return "", errors.New("browserMode must be isolated or existing")
+	}
+}
+
+func normalizeIDHubDebugPort(port int) (int, error) {
+	if port == 0 {
+		return idhubDefaultDebugPort, nil
+	}
+	if port < 1 || port > 65535 {
+		return 0, errors.New("debugPort must be between 1 and 65535")
+	}
+	return port, nil
+}
+
 func parseTenantAPIURL(raw string) (string, string) {
 	u, err := url.Parse(raw)
 	if err != nil || u.Host == "" {
@@ -1032,7 +1207,7 @@ func findBrowserExecutable() (string, error) {
 		}
 	}
 	candidates := []string{
-		"msedge", "microsoft-edge", "google-chrome", "chrome", "chromium", "chromium-browser",
+		"google-chrome", "chrome", "chromium", "chromium-browser", "msedge", "microsoft-edge",
 	}
 	for _, name := range candidates {
 		if path, err := exec.LookPath(name); err == nil {
@@ -1095,6 +1270,41 @@ func launchBrowser(browserPath string, port int, userDir string) (*exec.Cmd, err
 		return nil, fmt.Errorf("failed to launch the browser: %w", err)
 	}
 	return cmd, nil
+}
+
+func launchBrowserWithDefaultProfile(browserPath string, port int) (*exec.Cmd, error) {
+	args := []string{
+		fmt.Sprintf("--remote-debugging-port=%d", port),
+		"--remote-debugging-address=127.0.0.1",
+		"--no-first-run",
+		"--no-default-browser-check",
+		"--new-window",
+		"--window-size=1280,900",
+		"about:blank",
+	}
+	if runtime.GOOS == "linux" && os.Geteuid() == 0 {
+		args = append(args, "--no-sandbox")
+	}
+	cmd := exec.Command(browserPath, args...)
+	if err := cmd.Start(); err != nil {
+		return nil, fmt.Errorf("failed to launch the browser: %w", err)
+	}
+	return cmd, nil
+}
+
+func existingChromeDevToolsError(port int) error {
+	return fmt.Errorf("no Chrome or Edge DevTools session was found at 127.0.0.1:%d. If Chrome is already open, close it completely and click Use Chrome session again, or start it with `%s`", port, chromeRemoteDebugCommand(port))
+}
+
+func chromeRemoteDebugCommand(port int) string {
+	switch runtime.GOOS {
+	case "windows":
+		return fmt.Sprintf(`chrome.exe --remote-debugging-port=%d`, port)
+	case "darwin":
+		return fmt.Sprintf(`/Applications/Google\ Chrome.app/Contents/MacOS/Google\ Chrome --remote-debugging-port=%d`, port)
+	default:
+		return fmt.Sprintf("google-chrome --remote-debugging-port=%d", port)
+	}
 }
 
 func waitForDevTools(ctx context.Context, port int) error {
