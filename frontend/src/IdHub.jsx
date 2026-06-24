@@ -12,7 +12,6 @@ const CONNECTING_STATES = new Set([
 const SOURCE_KIND = "source";
 const TARGET_KIND = "target";
 const BROWSER_MODE_ISOLATED = "isolated";
-const BROWSER_MODE_EXISTING = "existing";
 
 function sortResources(items) {
   return [...items].sort((left, right) =>
@@ -122,7 +121,6 @@ function statusText({
   statusMessage,
   sourcesCount,
   targetsCount,
-  browserMode,
 }) {
   if (connected) {
     const total = sourcesCount + targetsCount;
@@ -131,9 +129,6 @@ function statusText({
       : "Connected to IDHub.";
   }
   if (CONNECTING_STATES.has(sessionState)) {
-    if (browserMode === BROWSER_MODE_EXISTING) {
-      return "Finish sign-in in Chrome.";
-    }
     return "Finish sign-in in the browser window.";
   }
   if (sessionState === "error") {
@@ -193,7 +188,6 @@ export default function IdHub({ onOpenLog }) {
   const [end, setEnd] = useState(!!initialCache.end);
   const [loadingJobs, setLoadingJobs] = useState(false);
   const [connecting, setConnecting] = useState(false);
-  const [connectMode, setConnectMode] = useState("");
 
   const bucket = useMemo(() => makeKey(tenantUrl, jobSelection), [tenantUrl, jobSelection]);
   const connected = Boolean(connectionInfo?.connected) || sessionState === "connected";
@@ -215,17 +209,14 @@ export default function IdHub({ onOpenLog }) {
     [targets],
   );
   const currentTenantHost = useMemo(() => tenantHost(tenantUrl), [tenantUrl]);
-  const activeBrowserMode = connectionInfo?.browserMode || connectMode;
   const compactStatus = statusText({
     connected,
     sessionState,
     statusMessage,
     sourcesCount: sources.length,
     targetsCount: targets.length,
-    browserMode: activeBrowserMode,
   });
   const showBrowserHint = CONNECTING_STATES.has(sessionState);
-  const usingExistingChrome = activeBrowserMode === BROWSER_MODE_EXISTING;
   const tenantLocked = connected || showBrowserHint;
   const headers = useMemo(() => {
     if (selectedKind === TARGET_KIND) {
@@ -275,9 +266,6 @@ export default function IdHub({ onOpenLog }) {
 
     setConnectionInfo(data || null);
     setSessionState(nextState);
-    if (data?.browserMode) {
-      setConnectMode(data.browserMode);
-    }
     setStatusMessage(
       data?.message || (data?.connected ? "Connected to IDHub." : "Enter a tenant URL to connect."),
     );
@@ -307,7 +295,6 @@ export default function IdHub({ onOpenLog }) {
       setConnectionInfo(null);
       setSessionId("");
       setSessionState("idle");
-      setConnectMode("");
       setSources([]);
       setTargets([]);
       setJobSelection("");
@@ -351,26 +338,21 @@ export default function IdHub({ onOpenLog }) {
     setEnd(false);
   }, []);
 
-  const startConnect = async (browserMode = BROWSER_MODE_ISOLATED) => {
+  const startConnect = async () => {
     if (!tenantUrl.trim()) {
       setErrorMessage("Enter a tenant URL first.");
       return;
     }
     setConnecting(true);
-    setConnectMode(browserMode);
     setErrorMessage("");
     setSessionState("launching");
-    setStatusMessage(
-      browserMode === BROWSER_MODE_EXISTING
-        ? "Looking for your Chrome session..."
-        : "Opening a browser window for sign-in...",
-    );
+    setStatusMessage("Opening a browser window for sign-in...");
     clearJobs();
     try {
       const response = await fetch("/api/idhub/connect/start", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ tenantUrl, browserMode }),
+        body: JSON.stringify({ tenantUrl, browserMode: BROWSER_MODE_ISOLATED }),
       });
       const data = await parseResponse(response, "Failed to start IDHub sign-in");
       setSessionId(data?.id || "");
@@ -391,7 +373,6 @@ export default function IdHub({ onOpenLog }) {
     setTargets([]);
     setJobSelection("");
     setSessionState("idle");
-    setConnectMode("");
     setStatusMessage("Disconnected from IDHub.");
     setErrorMessage("");
     clearJobs();
@@ -653,16 +634,14 @@ export default function IdHub({ onOpenLog }) {
 
         {showBrowserHint && (
           <div className="idhub-inline-note">
-            {usingExistingChrome
-              ? "Finish sign-in in Chrome. If no Chrome tab opens, start Chrome with remote debugging and try again."
-              : "Finish sign-in in the browser window. If the RI portal opens, click IDHub."}
+            Finish sign-in in the browser window. If the RI portal opens, click IDHub.
           </div>
         )}
 
         <div className="idhub-actions">
           <button
             className="btn btn--primary"
-            onClick={connected ? () => loadNext(true) : () => startConnect(BROWSER_MODE_ISOLATED)}
+            onClick={connected ? () => loadNext(true) : startConnect}
             disabled={connected ? !canLoadJobs || loadingJobs : !tenantUrl.trim() || connecting}
           >
             {connected
@@ -672,28 +651,15 @@ export default function IdHub({ onOpenLog }) {
                   ? "Reload jobs"
                   : "Load jobs"
               : connecting
-                ? usingExistingChrome
-                  ? "Connecting..."
-                  : "Opening browser..."
+                ? "Opening browser..."
                 : "Connect"}
           </button>
-
-          {!connected && (
-            <button
-              className="btn"
-              onClick={() => startConnect(BROWSER_MODE_EXISTING)}
-              disabled={!tenantUrl.trim() || connecting}
-              title="Open a reusable Chrome session for IDHub"
-            >
-              Use Chrome session
-            </button>
-          )}
 
           {connected && (
             <>
               <button
                 className="btn"
-                onClick={() => startConnect(BROWSER_MODE_ISOLATED)}
+                onClick={startConnect}
                 disabled={connecting}
               >
                 Reconnect

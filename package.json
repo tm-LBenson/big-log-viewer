@@ -1,6 +1,6 @@
 {
   "name": "big-log-viewer-root",
-  "version": "1.7.10",
+  "version": "1.7.11",
   "scripts": {
     "build": "node ./scripts/build-frontend.mjs",
     "start": "go run ./cmd/biglog"
