@@ -71,6 +71,7 @@ func main() {
 	http.HandleFunc("/api/open", openFile)
 	http.HandleFunc("/api/chunk", chunk)
 	http.HandleFunc("/api/window", textWindow)
+	http.HandleFunc("/api/raw-window", rawWindow)
 	http.HandleFunc("/api/raw", raw)
 	http.HandleFunc("/api/search", searchLines)
 	http.HandleFunc("/api/root", getRoot)
@@ -372,6 +373,40 @@ func textWindow(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, resp)
+}
+
+func rawWindow(w http.ResponseWriter, r *http.Request) {
+	mu.RLock()
+	f := current
+	if f == nil {
+		mu.RUnlock()
+		http.Error(w, "no file", http.StatusBadRequest)
+		return
+	}
+	if f.Mode != indexer.ModeByte {
+		mu.RUnlock()
+		http.Error(w, "raw window mode is only available for huge files", http.StatusBadRequest)
+		return
+	}
+	defer mu.RUnlock()
+
+	offset := clampInt64(atoi64(r.URL.Query().Get("offset")), 0, f.Size)
+	limit := atoi64(r.URL.Query().Get("limit"))
+	if limit <= 0 {
+		limit = hugeWindowBytes
+	}
+	if limit > hugeMaxWindowBytes {
+		limit = hugeMaxWindowBytes
+	}
+	if remaining := f.Size - offset; limit > remaining {
+		limit = remaining
+	}
+	reader := io.NewSectionReader(f.File, offset, limit)
+
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	if _, err := io.Copy(w, reader); err != nil {
+		log.Printf("raw window copy failed: %v", err)
+	}
 }
 
 func raw(w http.ResponseWriter, r *http.Request) {

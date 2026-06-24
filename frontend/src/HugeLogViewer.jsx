@@ -22,6 +22,13 @@ function clampOffset(offset, size) {
   return Math.max(0, Math.min(Math.max(0, size || 0), offset || 0));
 }
 
+function escapeHtml(value) {
+  return String(value)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;");
+}
+
 export default function HugeLogViewer({ path, fileSize }) {
   const [windowData, setWindowData] = useState(null);
   const [offset, setOffset] = useState(0);
@@ -34,11 +41,14 @@ export default function HugeLogViewer({ path, fileSize }) {
   const [searchMore, setSearchMore] = useState(false);
   const [searchNextOffset, setSearchNextOffset] = useState(0);
   const [notice, setNotice] = useState("");
+  const [lineNums, setLineNums] = useState(false);
+  const [copyStatus, setCopyStatus] = useState("");
   const loadCtrl = useRef(null);
   const searchCtrl = useRef(null);
   const scrollRef = useRef(null);
   const activeRowRef = useRef(null);
   const pendingScrollRef = useRef("top");
+  const copyTimerRef = useRef(0);
 
   const size = windowData?.size || fileSize || 0;
   const progress = size ? Math.min(100, (offset / size) * 100) : 0;
@@ -107,6 +117,7 @@ export default function HugeLogViewer({ path, fileSize }) {
     return () => {
       loadCtrl.current?.abort();
       searchCtrl.current?.abort();
+      window.clearTimeout(copyTimerRef.current);
     };
   }, [loadWindow, path]);
 
@@ -234,6 +245,67 @@ export default function HugeLogViewer({ path, fileSize }) {
     activeRowRef.current = node;
   }, []);
 
+  const showCopyStatus = useCallback((message) => {
+    setCopyStatus(message);
+    window.clearTimeout(copyTimerRef.current);
+    copyTimerRef.current = window.setTimeout(() => setCopyStatus(""), 1800);
+  }, []);
+
+  const writeClipboard = useCallback(async (text, html) => {
+    if (html && navigator.clipboard && window.ClipboardItem) {
+      const item = new ClipboardItem({
+        "text/html": new Blob([html], { type: "text/html" }),
+        "text/plain": new Blob([text], { type: "text/plain" }),
+      });
+      await navigator.clipboard.write([item]);
+      return;
+    }
+    if (navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(text);
+      return;
+    }
+    const ta = document.createElement("textarea");
+    ta.value = text;
+    ta.style.position = "fixed";
+    ta.style.opacity = "0";
+    document.body.appendChild(ta);
+    ta.focus();
+    ta.select();
+    document.execCommand("copy");
+    document.body.removeChild(ta);
+  }, []);
+
+  const copyRenderedSection = useCallback(async () => {
+    if (!lines.length) return;
+    const text = lines
+      .map((line, index) => `${lineNums ? `${index + 1}\t` : ""}${line.text}`)
+      .join("\n");
+    const html = `<pre>${escapeHtml(text)}</pre>`;
+    try {
+      await writeClipboard(text, html);
+      showCopyStatus("Copied rendered section");
+    } catch {
+      showCopyStatus("Copy failed");
+    }
+  }, [lineNums, lines, showCopyStatus, writeClipboard]);
+
+  const copyRawSection = useCallback(async () => {
+    if (!windowData) return;
+    try {
+      const params = new URLSearchParams({
+        offset: String(windowData.offset || 0),
+        limit: String(windowData.limit || WINDOW_BYTES),
+      });
+      const response = await fetch(`/api/raw-window?${params.toString()}`);
+      if (!response.ok) throw new Error(await response.text());
+      const text = await response.text();
+      await writeClipboard(text);
+      showCopyStatus("Copied raw section");
+    } catch {
+      showCopyStatus("Copy failed");
+    }
+  }, [showCopyStatus, windowData, writeClipboard]);
+
   const matchLabel =
     searchIndex >= 0
       ? `${searchIndex + 1} / ${searchItems.length}${searchMore ? "+" : ""}`
@@ -297,6 +369,33 @@ export default function HugeLogViewer({ path, fileSize }) {
           </button>
           <span className="huge-search-meta">{matchLabel}</span>
         </div>
+        <div className="divider" />
+        <div className="huge-tools">
+          <button
+            className={`btn btn--toggle${lineNums ? " active" : ""}`}
+            onClick={() => setLineNums((value) => !value)}
+            title="Line numbers"
+          >
+            #
+          </button>
+          <button
+            className="btn"
+            onClick={copyRenderedSection}
+            disabled={!lines.length}
+            title="Copy rendered current section"
+          >
+            Copy rendered
+          </button>
+          <button
+            className="btn"
+            onClick={copyRawSection}
+            disabled={!windowData}
+            title="Copy raw current section"
+          >
+            Copy raw
+          </button>
+          {copyStatus ? <span className="huge-copy-status">{copyStatus}</span> : null}
+        </div>
       </nav>
 
       <div className="huge-status">
@@ -324,8 +423,11 @@ export default function HugeLogViewer({ path, fileSize }) {
                 <div
                   key={`${line.offset}-${index}`}
                   ref={isActive ? setActiveRow : undefined}
-                  className={`huge-log-row${isActive ? " is-match" : ""}`}
+                  className={`huge-log-row${lineNums ? " has-line-numbers" : ""}${isActive ? " is-match" : ""}`}
                 >
+                  {lineNums ? (
+                    <span className="huge-log-line-no">{index + 1}</span>
+                  ) : null}
                   <span className="huge-log-offset">{formatBytes(line.offset)}</span>
                   <span className="huge-log-text">{line.text}</span>
                 </div>
