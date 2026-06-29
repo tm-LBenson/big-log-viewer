@@ -2,3 +2,4 @@ logs/*.html
 logs/*.log
 logs/idhub/*
 /biglog
+roadmap.md

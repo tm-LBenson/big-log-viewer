@@ -3,6 +3,7 @@ import { createPortal } from "react-dom";
 import SearchCtx from "./SearchContext";
 import useSettings from "./useSettings";
 import { PAGE, BYTE_PAGE } from "./constants";
+import { addSavedSearch, readSavedSearches, removeSavedSearch } from "./savedSearches";
 
 function parseUserTs(s) {
   if (!s) return NaN;
@@ -77,6 +78,7 @@ export default function SearchProvider({
   const [regex, setRegex] = useState(false);
   const [caseSensitive, setCaseSensitive] = useState(false);
   const [autoJump, setAutoJump] = useState(true);
+  const [savedSearches, setSavedSearches] = useState(() => readSavedSearches());
 
   const [matches, setMatches] = useState([]);
   const [totalMatches, setTotalMatches] = useState(0);
@@ -90,6 +92,7 @@ export default function SearchProvider({
 
   const debounce = useRef(null);
   const runCtrl = useRef(null);
+  const currentSearchSaved = savedSearches.includes(q.trim());
 
   const fetchTotalIfNeeded = async (query) => {
     try {
@@ -140,6 +143,25 @@ export default function SearchProvider({
         setCur(0);
         setTotalMatches(0);
       });
+  };
+
+  const queueSearch = (query) => {
+    setQ(query);
+    clearTimeout(debounce.current);
+    debounce.current = setTimeout(() => run(query), 300);
+  };
+
+  const runSavedSearch = (query) => {
+    clearTimeout(debounce.current);
+    run(query);
+  };
+
+  const saveCurrentSearch = () => {
+    setSavedSearches(addSavedSearch(q));
+  };
+
+  const removeCurrentSearch = () => {
+    setSavedSearches(removeSavedSearch(q));
   };
 
   const step = (d) => {
@@ -335,11 +357,10 @@ export default function SearchProvider({
         <div className="searchbox">
           <input
             className="field search-input"
+            value={q}
             placeholder="search…"
             onChange={(e) => {
-              const v = e.target.value;
-              clearTimeout(debounce.current);
-              debounce.current = setTimeout(() => run(v), 300);
+              queueSearch(e.target.value);
             }}
             aria-label="Search"
           />
@@ -352,6 +373,37 @@ export default function SearchProvider({
             ⋮
           </button>
         </div>
+        <select
+          className="field saved-search-select"
+          value=""
+          onChange={(e) => {
+            if (e.target.value) runSavedSearch(e.target.value);
+          }}
+          title="Saved searches"
+        >
+          <option value="">Saved ({savedSearches.length})</option>
+          {savedSearches.map((term) => (
+            <option key={term} value={term}>
+              {term}
+            </option>
+          ))}
+        </select>
+        <button
+          className="btn btn--icon"
+          onClick={saveCurrentSearch}
+          disabled={!q.trim() || currentSearchSaved}
+          title="Save current search"
+        >
+          +
+        </button>
+        <button
+          className="btn btn--icon"
+          onClick={removeCurrentSearch}
+          disabled={!currentSearchSaved}
+          title="Remove current saved search"
+        >
+          -
+        </button>
 
         <button
           className="btn btn--icon"

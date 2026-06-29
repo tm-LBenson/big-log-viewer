@@ -6,8 +6,17 @@ import useSettings, { applyBackend } from "./useSettings";
 import IDHub from "./IdHub";
 import "./App.css";
 
+function rememberRecent(files, nextFile) {
+  if (!nextFile) return Array.isArray(files) ? files : [];
+  return [
+    nextFile,
+    ...(Array.isArray(files) ? files : []).filter((item) => item && item !== nextFile),
+  ].slice(0, 12);
+}
+
 export default function App() {
   const [file, setFile] = useState(null);
+  const [recentFiles, setRecentFiles] = useState([]);
   const [width, setWidth] = useState(260);
   const [openSettings, setOpenSettings] = useState(false);
   const [tab, setTab] = useState("files");
@@ -19,8 +28,9 @@ export default function App() {
     const s = store.get();
     document.documentElement.setAttribute("data-theme", s.theme || "dark");
     if (s.lastFile) setFile(s.lastFile);
+    setRecentFiles(Array.isArray(s.recentFiles) ? s.recentFiles : []);
     applyBackend(s).then(() => fileListRef.current?.reload());
-  }, []);
+  }, [store]);
 
   const onMouseMove = useCallback((e) => {
     if (!drag.current) return;
@@ -40,8 +50,10 @@ export default function App() {
   };
 
   const onSelectFile = (p) => {
+    const recent = rememberRecent(store.get().recentFiles, p);
     setFile(p);
-    store.set({ lastFile: p });
+    setRecentFiles(recent);
+    store.set({ lastFile: p, recentFiles: recent });
   };
 
   return (
@@ -82,6 +94,7 @@ export default function App() {
           <FileList
             ref={fileListRef}
             sel={file}
+            recentFiles={recentFiles}
             onSel={onSelectFile}
             onLoaded={(paths) => {
               const last = store.get().lastFile;
@@ -98,8 +111,10 @@ export default function App() {
         <div style={{ height: "calc(100% - 56px)" }}>
           <IDHub
             onOpenLog={(path) => {
+              const recent = rememberRecent(store.get().recentFiles, path);
               setFile(path);
-              store.set({ lastFile: path });
+              setRecentFiles(recent);
+              store.set({ lastFile: path, recentFiles: recent });
               setTab("files");
             }}
           />

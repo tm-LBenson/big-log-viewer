@@ -1,6 +1,9 @@
 const LOG_LINE_RE =
   /^(\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}(?:[.,]\d{3})?)\s+(TRACE|DEBUG|INFO|WARN|ERROR)\s+([^\s]+)\s+(?:-|–|—)\s*(.*)$/;
 
+const SUMMARY_BLOCK_RE =
+  /(?:BatchOrchestrator\s*-\s*|SyncOrchestrator\s*-\s*|LCSJobStatusPublisher\s*-\s*Publishing pipeline statistics\s*){/g;
+
 const ACTION_META = [
   { bucket: "creationStats", key: "created", label: "Created" },
   { bucket: "updateStats", key: "updated", label: "Updated" },
@@ -12,7 +15,12 @@ const ACTION_META = [
 const EXTRA_SUCCESS_KEYS = ["moved", "disabled", "enabled"];
 
 function toNum(value) {
-  return Number.isFinite(value) ? value : 0;
+  if (Number.isFinite(value)) return value;
+  if (typeof value === "string" && value.trim() !== "") {
+    const parsed = Number(value);
+    return Number.isFinite(parsed) ? parsed : 0;
+  }
+  return 0;
 }
 
 function humanizeToken(value) {
@@ -90,16 +98,16 @@ function buildBlock(text, seg, kind, lineStartIdx = seg.startIdx) {
 
 function findResourceBlocks(text) {
   const blocks = [];
-  const re = /^.*resources\.json(?:[^\n{]*)?:\s*$/gim;
+  const re = /resources\.json[^\n{]*(?:\n\s*)?{/gim;
   let match;
   while ((match = re.exec(text))) {
-    const firstBrace = text.indexOf("{", match.index + match[0].length);
-    if (firstBrace === -1) break;
+    const firstBrace = match.index + match[0].lastIndexOf("{");
     const seg = parseJsonAt(text, firstBrace);
     if (!seg) continue;
+    const lineStartIdx = text.lastIndexOf("\n", match.index) + 1;
     try {
       blocks.push({
-        ...buildBlock(text, seg, "resource", match.index),
+        ...buildBlock(text, seg, "resource", lineStartIdx),
         data: JSON.parse(seg.raw),
       });
     } catch {
@@ -112,7 +120,7 @@ function findResourceBlocks(text) {
 
 function findBatchSummaryBlocks(text) {
   const blocks = [];
-  const re = /BatchOrchestrator\s*-\s*{/g;
+  const re = new RegExp(SUMMARY_BLOCK_RE.source, "g");
   let match;
   while ((match = re.exec(text))) {
     const seg = parseJsonAt(text, match.index + match[0].length - 1);
@@ -126,6 +134,11 @@ function findBatchSummaryBlocks(text) {
     re.lastIndex = seg.endIdx;
   }
   return blocks;
+}
+
+function summaryContent(summary) {
+  if (!summary || typeof summary !== "object") return summary;
+  return summary?.statistics?.content || summary?.content || summary;
 }
 
 function parseThresholdLine(text) {
@@ -252,6 +265,7 @@ function buildSystemSummary(name, stats, kind) {
 }
 
 function collectSystemSummaries(summary) {
+  summary = summaryContent(summary);
   const systems = [];
   const idStoreStats = summary?.idStoreStats;
   if (idStoreStats?.synchronizationStats) {
@@ -316,14 +330,16 @@ function buildActionTotals(systems) {
 }
 
 function collectFailureBreakdown(summary) {
+  summary = summaryContent(summary);
   const counts = new Map();
 
   function walkFailureDetails(details) {
     if (!details || typeof details !== "object") return;
     for (const [key, value] of Object.entries(details)) {
       if (key === "roleStats") continue;
-      if (Number.isFinite(value)) {
-        counts.set(key, (counts.get(key) || 0) + value);
+      const numeric = toNum(value);
+      if (numeric) {
+        counts.set(key, (counts.get(key) || 0) + numeric);
       } else if (value && typeof value === "object") {
         walkFailureDetails(value);
       }
@@ -347,6 +363,7 @@ function collectFailureBreakdown(summary) {
 }
 
 function buildSourceDiff(threshold, summary) {
+  summary = summaryContent(summary);
   const diff = {
     sourceRecords: threshold?.source,
     adds: threshold?.add,
@@ -470,13 +487,14 @@ function buildDetailRows(resources, parsedSourceConnection) {
 }
 
 export function parseIdHubLog(raw) {
+  raw = String(raw || "").replace(/\0/g, "");
   const resourceBlocks = findResourceBlocks(raw);
   const summaryBlocks = findBatchSummaryBlocks(raw);
   const latestResources = resourceBlocks.length
     ? redact(resourceBlocks[resourceBlocks.length - 1].data)
     : null;
   const latestSummary = summaryBlocks.length
-    ? redact(summaryBlocks[summaryBlocks.length - 1].data)
+    ? redact(summaryContent(summaryBlocks[summaryBlocks.length - 1].data))
     : null;
   const threshold = parseThresholdLine(raw);
   const thresholdDisabled = /Threshold checking has been disabled for this job run\.?/i.test(raw);

@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"crypto/sha256"
 	"embed"
 	"encoding/json"
 	"errors"
@@ -15,8 +16,11 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"os/exec"
+	pathpkg "path"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -32,6 +36,9 @@ const hugeMaxWindowBytes int64 = 8 << 20
 const hugeMaxLineBytes int64 = 2 << 20
 const hugeWindowMaxRows = 2500
 const hugeSearchBytes int64 = 256 << 20
+const idhubLogDefaultPageSize int64 = 5_000_000
+const idhubLogMaxPageSize int64 = 50_000_000
+const idhubLogDefaultMaxPages = 20_000
 
 var (
 	rootDir string
@@ -41,7 +48,7 @@ var (
 
 	defaultExt = []string{
 		".log", ".txt", ".html", ".htm", ".csv", ".tsv",
-		".json", ".ndjson", ".xml", ".md", ".js", ".css",
+		".json", ".jsonl", ".ndjson", ".xml", ".md", ".js", ".css",
 	}
 	extSet = make(map[string]struct{})
 	extMu  sync.RWMutex
@@ -68,6 +75,8 @@ func main() {
 	http.Handle("/", http.FileServer(http.FS(sub)))
 
 	http.HandleFunc("/api/list", listDir)
+	http.HandleFunc("/api/file-info", fileInfo)
+	http.HandleFunc("/api/file-info/reveal", revealFile)
 	http.HandleFunc("/api/open", openFile)
 	http.HandleFunc("/api/chunk", chunk)
 	http.HandleFunc("/api/window", textWindow)
@@ -101,7 +110,14 @@ func main() {
 }
 
 func listDir(w http.ResponseWriter, r *http.Request) {
+	type listedFile struct {
+		Path    string `json:"path"`
+		Size    int64  `json:"size"`
+		ModTime int64  `json:"modTime"`
+	}
+	details := r.URL.Query().Get("details") == "1"
 	var out []string
+	var detailed []listedFile
 
 	extMu.RLock()
 	curExtSet := cloneExtSet()
@@ -114,10 +130,29 @@ func listDir(w http.ResponseWriter, r *http.Request) {
 		}
 		if shouldIncludeFile(p, curExtSet, allowAllText) {
 			rel, _ := filepath.Rel(rootDir, p)
-			out = append(out, rel)
+			rel = filepath.ToSlash(rel)
+			if details {
+				info, infoErr := d.Info()
+				if infoErr != nil {
+					return nil
+				}
+				detailed = append(detailed, listedFile{
+					Path:    rel,
+					Size:    info.Size(),
+					ModTime: info.ModTime().UnixMilli(),
+				})
+			} else {
+				out = append(out, rel)
+			}
 		}
 		return nil
 	})
+	if details {
+		writeJSON(w, struct {
+			Files []listedFile `json:"files"`
+		}{detailed})
+		return
+	}
 	writeJSON(w, out)
 }
 
@@ -129,6 +164,21 @@ type extensionsReq struct {
 type extensionsResp struct {
 	Extensions []string `json:"extensions"`
 	Defaults   []string `json:"defaults"`
+}
+
+type fileInfoResp struct {
+	Path           string `json:"path"`
+	Name           string `json:"name"`
+	AbsPath        string `json:"absPath"`
+	Directory      string `json:"directory"`
+	Size           int64  `json:"size"`
+	ModTime        int64  `json:"modTime"`
+	Extension      string `json:"extension"`
+	InnerExtension string `json:"innerExtension,omitempty"`
+	Compressed     bool   `json:"compressed"`
+	Format         string `json:"format"`
+	Hint           string `json:"hint,omitempty"`
+	HugeHint       bool   `json:"hugeHint"`
 }
 
 func extensionsHandler(w http.ResponseWriter, r *http.Request) {
@@ -246,10 +296,167 @@ func shouldIncludeFile(p string, curExtSet map[string]struct{}, allowAllText boo
 	if _, ok := curExtSet[ext]; ok {
 		return true
 	}
+	if ext == ".gz" {
+		innerExt := strings.ToLower(filepath.Ext(strings.TrimSuffix(p, ext)))
+		if innerExt != "" {
+			if _, ok := curExtSet[innerExt]; ok {
+				return true
+			}
+		}
+	}
 	if allowAllText {
 		return isTextBySniff(p)
 	}
 	return false
+}
+
+func fileInfo(w http.ResponseWriter, r *http.Request) {
+	path := r.URL.Query().Get("path")
+	if path == "" {
+		http.Error(w, "path param required", http.StatusBadRequest)
+		return
+	}
+	abs, err := resolveLogPath(path)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusForbidden)
+		return
+	}
+	info, err := os.Stat(abs)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusNotFound)
+		return
+	}
+	if info.IsDir() {
+		http.Error(w, "path is a directory", http.StatusBadRequest)
+		return
+	}
+	rel, _ := filepath.Rel(rootDir, abs)
+	rel = filepath.ToSlash(rel)
+	ext, innerExt, compressed := fileExtensions(abs)
+	format := detectFileFormat(ext, innerExt)
+	writeJSON(w, fileInfoResp{
+		Path:           rel,
+		Name:           filepath.Base(abs),
+		AbsPath:        abs,
+		Directory:      filepath.Dir(abs),
+		Size:           info.Size(),
+		ModTime:        info.ModTime().UnixMilli(),
+		Extension:      ext,
+		InnerExtension: innerExt,
+		Compressed:     compressed,
+		Format:         format,
+		Hint:           formatHint(format),
+		HugeHint:       !compressed && info.Size() > indexer.MaxIndexedBytes,
+	})
+}
+
+func revealFile(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "POST only", http.StatusMethodNotAllowed)
+		return
+	}
+	path := r.URL.Query().Get("path")
+	if path == "" {
+		http.Error(w, "path param required", http.StatusBadRequest)
+		return
+	}
+	abs, err := resolveLogPath(path)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusForbidden)
+		return
+	}
+	if err := revealPath(abs); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, struct {
+		OK bool `json:"ok"`
+	}{true})
+}
+
+func revealPath(path string) error {
+	name, args := revealCommand(runtime.GOOS, path)
+	if name == "" {
+		return errors.New("opening the containing folder is not supported on this platform")
+	}
+	return exec.Command(name, args...).Start()
+}
+
+func revealCommand(goos string, path string) (string, []string) {
+	switch goos {
+	case "windows":
+		return "explorer.exe", []string{"/select," + path}
+	case "darwin":
+		return "open", []string{"-R", path}
+	case "linux":
+		return "xdg-open", []string{pathpkg.Dir(filepath.ToSlash(path))}
+	default:
+		return "", nil
+	}
+}
+
+func fileExtensions(path string) (ext string, innerExt string, compressed bool) {
+	ext = strings.ToLower(filepath.Ext(path))
+	if ext == ".gz" {
+		compressed = true
+		innerExt = strings.ToLower(filepath.Ext(strings.TrimSuffix(path, ext)))
+	}
+	return ext, innerExt, compressed
+}
+
+func detectFileFormat(ext string, innerExt string) string {
+	e := ext
+	if innerExt != "" {
+		e = innerExt
+	}
+	switch e {
+	case ".html", ".htm":
+		return "HTML"
+	case ".json":
+		return "JSON"
+	case ".jsonl", ".ndjson":
+		return "JSONL"
+	case ".xml":
+		return "XML"
+	case ".csv":
+		return "CSV"
+	case ".tsv":
+		return "TSV"
+	case ".log":
+		return "Log"
+	case ".txt":
+		return "Text"
+	case ".md":
+		return "Markdown"
+	case ".js":
+		return "JavaScript"
+	case ".css":
+		return "CSS"
+	default:
+		if e == "" {
+			return "Text"
+		}
+		return strings.TrimPrefix(strings.ToUpper(e), ".")
+	}
+}
+
+func formatHint(format string) string {
+	switch format {
+	case "JSONL":
+		return "line-delimited records"
+	case "JSON":
+		return "structured document"
+	case "XML":
+		return "structured markup"
+	case "CSV", "TSV":
+		return "table data"
+	case "HTML":
+		return "rendered log"
+	case "Log", "Text":
+		return "plain text"
+	default:
+		return ""
+	}
 }
 
 func openFile(w http.ResponseWriter, r *http.Request) {
@@ -258,13 +465,9 @@ func openFile(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "path param required", 400)
 		return
 	}
-	if !filepath.IsAbs(path) {
-		path = filepath.Join(rootDir, path)
-	}
-	abs, _ := filepath.Abs(path)
-	abs, _ = filepath.EvalSymlinks(abs)
-	if !withinRoot(abs) {
-		http.Error(w, "path outside root", 403)
+	abs, err := resolveLogPath(path)
+	if err != nil {
+		http.Error(w, err.Error(), 403)
 		return
 	}
 	f, err := indexer.Open(abs)
@@ -316,6 +519,7 @@ func chunk(w http.ResponseWriter, r *http.Request) {
 type textWindowLine struct {
 	Offset int64  `json:"offset"`
 	Text   string `json:"text"`
+	Tone   string `json:"tone,omitempty"`
 }
 
 type textWindowResp struct {
@@ -331,6 +535,7 @@ type textWindowResp struct {
 type hugeSearchItem struct {
 	Offset int64  `json:"offset"`
 	Text   string `json:"text"`
+	Tone   string `json:"tone,omitempty"`
 }
 
 type hugeSearchResp struct {
@@ -424,6 +629,16 @@ func raw(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "path outside root", 403)
 		return
 	}
+	if indexer.IsGzipPath(abs) && r.Method != http.MethodHead {
+		tempPath, cleanup, err := indexer.DecompressGzipToTemp(abs)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		defer cleanup()
+		http.ServeFile(w, r, tempPath)
+		return
+	}
 	http.ServeFile(w, r, abs)
 }
 
@@ -445,8 +660,18 @@ func searchLines(w http.ResponseWriter, r *http.Request) {
 	if limit <= 0 {
 		limit = 500
 	}
+	matcher, err := newTextMatcher(
+		q,
+		r.URL.Query().Get("regex") == "1",
+		r.URL.Query().Get("case") == "1",
+	)
+	if err != nil {
+		mu.RUnlock()
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
 	if f.Mode == indexer.ModeByte {
-		resp, err := searchHugeFile(r, f, q, limit)
+		resp, err := searchHugeFile(r, f, matcher, limit)
 		mu.RUnlock()
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -455,25 +680,51 @@ func searchLines(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, resp)
 		return
 	}
-	needle := bytes.ToLower([]byte(q))
 	matches := make([]int, 0, limit)
-	for g := 0; g*indexer.Group < f.Lines && len(matches) < limit; g++ {
+	total := 0
+	for g := 0; g*indexer.Group < f.Lines; g++ {
 		start := g * indexer.Group
 		lines, err := f.LinesSlice(start, indexer.Group)
 		if err != nil {
 			break
 		}
 		for i, ln := range lines {
-			if bytes.Contains(bytes.ToLower([]byte(ln)), needle) {
-				matches = append(matches, start+i)
-				if len(matches) == limit {
-					break
+			if matcher(ln) {
+				total++
+				if len(matches) < limit {
+					matches = append(matches, start+i)
 				}
 			}
 		}
 	}
 	mu.RUnlock()
-	writeJSON(w, struct{ Matches []int }{matches})
+	writeJSON(w, struct {
+		Matches []int `json:"Matches"`
+		Total   int   `json:"Total"`
+	}{matches, total})
+}
+
+func newTextMatcher(q string, regexMode bool, caseSensitive bool) (func(string) bool, error) {
+	if regexMode {
+		pattern := q
+		if !caseSensitive {
+			pattern = "(?i)" + pattern
+		}
+		re, err := regexp.Compile(pattern)
+		if err != nil {
+			return nil, fmt.Errorf("invalid regex: %w", err)
+		}
+		return re.MatchString, nil
+	}
+	if caseSensitive {
+		return func(text string) bool {
+			return strings.Contains(text, q)
+		}, nil
+	}
+	needle := strings.ToLower(q)
+	return func(text string) bool {
+		return strings.Contains(strings.ToLower(text), needle)
+	}, nil
 }
 
 var (
@@ -481,6 +732,10 @@ var (
 	htmlStyleRe  = regexp.MustCompile(`(?is)<style[^>]*>.*?</style>`)
 	htmlBreakRe  = regexp.MustCompile(`(?i)<br\s*/?>|</(?:p|div|tr|li|h[1-6]|font)>`)
 	htmlTagRe    = regexp.MustCompile(`(?s)<[^>]*>`)
+	errorToneRe  = regexp.MustCompile(`(?i)\b(fatal|panic|exception|error|failed|failure|severe|denied|timeout)\b`)
+	warnToneRe   = regexp.MustCompile(`(?i)\b(warn|warning|retry|skipped|threshold)\b`)
+	okToneRe     = regexp.MustCompile(`(?i)\b(success|succeeded|complete|completed|ok)\b`)
+	infoToneRe   = regexp.MustCompile(`(?i)\b(info|debug|trace|started|processing)\b`)
 )
 
 func readTextWindow(f *indexer.File, offset, limit int64, align bool, tail bool) (textWindowResp, error) {
@@ -509,7 +764,7 @@ func readTextWindow(f *indexer.File, offset, limit int64, align bool, tail bool)
 	}, nil
 }
 
-func searchHugeFile(r *http.Request, f *indexer.File, q string, limit int) (hugeSearchResp, error) {
+func searchHugeFile(r *http.Request, f *indexer.File, matcher func(string) bool, limit int) (hugeSearchResp, error) {
 	if limit <= 0 || limit > 500 {
 		limit = 100
 	}
@@ -521,11 +776,9 @@ func searchHugeFile(r *http.Request, f *indexer.File, q string, limit int) (huge
 	if maxBytes > 2<<30 {
 		maxBytes = 2 << 30
 	}
-
-	needle := strings.ToLower(q)
 	items := make([]hugeSearchItem, 0, limit)
 	lines, next, truncated, err := scanCleanRows(f, offset, maxBytes, limit, func(_ []byte, text string) bool {
-		return strings.Contains(strings.ToLower(text), needle)
+		return matcher(text)
 	}, false)
 	if err != nil {
 		return hugeSearchResp{}, err
@@ -535,6 +788,7 @@ func searchHugeFile(r *http.Request, f *indexer.File, q string, limit int) (huge
 		items = append(items, hugeSearchItem{
 			Offset: line.Offset,
 			Text:   line.Text,
+			Tone:   line.Tone,
 		})
 		offsets = append(offsets, line.Offset)
 	}
@@ -630,7 +884,11 @@ func cleanLogRows(raw []byte, baseOffset int64) []textWindowLine {
 			if strings.TrimSpace(part) == "" {
 				continue
 			}
-			rows = append(rows, textWindowLine{Offset: offset, Text: part})
+			rows = append(rows, textWindowLine{
+				Offset: offset,
+				Text:   part,
+				Tone:   detectLogTone(segment, part),
+			})
 		}
 	}
 
@@ -664,6 +922,50 @@ func cleanLogText(s string) string {
 	s = strings.ReplaceAll(s, "\r\n", "\n")
 	s = strings.ReplaceAll(s, "\r", "\n")
 	return s
+}
+
+func detectLogTone(raw, text string) string {
+	lowerRaw := strings.ToLower(raw)
+	switch {
+	case strings.Contains(lowerRaw, "color=\"red") ||
+		strings.Contains(lowerRaw, "color='red") ||
+		strings.Contains(lowerRaw, "color:red") ||
+		strings.Contains(lowerRaw, "color: red") ||
+		strings.Contains(lowerRaw, "#ff0000") ||
+		strings.Contains(lowerRaw, "#f00"):
+		return "error"
+	case strings.Contains(lowerRaw, "color=\"orange") ||
+		strings.Contains(lowerRaw, "color='orange") ||
+		strings.Contains(lowerRaw, "color=\"yellow") ||
+		strings.Contains(lowerRaw, "color='yellow") ||
+		strings.Contains(lowerRaw, "color:orange") ||
+		strings.Contains(lowerRaw, "color: orange") ||
+		strings.Contains(lowerRaw, "color:yellow") ||
+		strings.Contains(lowerRaw, "color: yellow"):
+		return "warn"
+	case strings.Contains(lowerRaw, "color=\"green") ||
+		strings.Contains(lowerRaw, "color='green") ||
+		strings.Contains(lowerRaw, "color:green") ||
+		strings.Contains(lowerRaw, "color: green"):
+		return "ok"
+	case strings.Contains(lowerRaw, "color=\"blue") ||
+		strings.Contains(lowerRaw, "color='blue") ||
+		strings.Contains(lowerRaw, "color:blue") ||
+		strings.Contains(lowerRaw, "color: blue") ||
+		strings.Contains(lowerRaw, "color=\"gray") ||
+		strings.Contains(lowerRaw, "color='gray"):
+		return "info"
+	case errorToneRe.MatchString(text):
+		return "error"
+	case warnToneRe.MatchString(text):
+		return "warn"
+	case okToneRe.MatchString(text):
+		return "ok"
+	case infoToneRe.MatchString(text):
+		return "info"
+	default:
+		return ""
+	}
 }
 
 func lineStartAtOrBefore(f *indexer.File, offset int64) int64 {
@@ -776,6 +1078,24 @@ func rangeLines(w http.ResponseWriter, r *http.Request) {
 func writeJSON(w http.ResponseWriter, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(v)
+}
+
+func resolveLogPath(path string) (string, error) {
+	if !filepath.IsAbs(path) {
+		path = filepath.Join(rootDir, path)
+	}
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return "", err
+	}
+	abs, err = filepath.EvalSymlinks(abs)
+	if err != nil {
+		return "", err
+	}
+	if !withinRoot(abs) {
+		return "", errors.New("path outside root")
+	}
+	return abs, nil
 }
 
 func atoi(s string) int {
@@ -966,60 +1286,148 @@ func idhubLog(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "job is required", http.StatusBadRequest)
 		return
 	}
-	size := strings.TrimSpace(r.URL.Query().Get("size"))
-	if size == "" {
-		size = "5000000"
-	}
-	page := strings.TrimSpace(r.URL.Query().Get("page"))
-	if page == "" {
-		page = "0"
-	}
-
-	u := fmt.Sprintf("%s/v1/tenants/%s/jobs/%s/logs?page[size]=%s&page[number]=%s",
-		proxy.Base,
-		url.PathEscape(proxy.Tenant),
-		url.PathEscape(jobID),
-		url.QueryEscape(size),
-		url.QueryEscape(page),
-	)
-
-	req, _ := http.NewRequest(http.MethodGet, u, nil)
-	req.Header.Set("Authorization", proxy.Auth)
-	req.Header.Set("Accept", "text/plain,application/json,text/plain")
-
-	client := &http.Client{Timeout: 60 * time.Second}
-	resp, err := client.Do(req)
-	if err != nil {
-		http.Error(w, "upstream error", http.StatusBadGateway)
-		return
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		w.Header().Set("Content-Type", resp.Header.Get("Content-Type"))
-		w.WriteHeader(resp.StatusCode)
-		_, _ = io.Copy(w, resp.Body)
-		return
-	}
+	pageSize := idhubLogPageSize(r.URL.Query().Get("size"))
+	maxPages := idhubLogMaxPages(r.URL.Query().Get("maxPages"))
 
 	relDir := filepath.Join("idhub", sanitize(proxy.Tenant), "jobs")
 	absDir := filepath.Join(rootDir, relDir)
 	_ = os.MkdirAll(absDir, 0o755)
 	fileName := sanitize(jobID) + ".log"
 	absPath := filepath.Join(absDir, fileName)
-	f, err := os.Create(absPath)
+	tmp, err := os.CreateTemp(absDir, fileName+".*.download")
 	if err != nil {
 		http.Error(w, "failed to create log file", http.StatusInternalServerError)
 		return
 	}
-	defer f.Close()
+	tmpPath := tmp.Name()
+	complete := false
+	defer func() {
+		if !complete {
+			_ = os.Remove(tmpPath)
+		}
+	}()
 
-	if _, err := io.Copy(f, resp.Body); err != nil {
-		http.Error(w, "failed to write log file", http.StatusInternalServerError)
-		return
+	client := &http.Client{Timeout: 5 * time.Minute}
+	var totalBytes int64
+	var pages int
+	var firstHash []byte
+	var firstBytes int64
+	var truncated bool
+
+	for page := 0; page < maxPages; page++ {
+		req, err := newIDHubLogRequest(r, proxy, jobID, pageSize, page)
+		if err != nil {
+			_ = tmp.Close()
+			http.Error(w, "failed to build upstream request", http.StatusInternalServerError)
+			return
+		}
+		resp, err := client.Do(req)
+		if err != nil {
+			_ = tmp.Close()
+			http.Error(w, "upstream error", http.StatusBadGateway)
+			return
+		}
+		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+			if page > 0 && totalBytes > 0 && (resp.StatusCode == http.StatusNotFound || resp.StatusCode == http.StatusRequestedRangeNotSatisfiable) {
+				_, _ = io.Copy(io.Discard, resp.Body)
+				resp.Body.Close()
+				break
+			}
+			_ = tmp.Close()
+			defer resp.Body.Close()
+			if page == 0 {
+				w.Header().Set("Content-Type", resp.Header.Get("Content-Type"))
+				w.WriteHeader(resp.StatusCode)
+				_, _ = io.Copy(w, resp.Body)
+				return
+			}
+			body, _ := io.ReadAll(resp.Body)
+			http.Error(w, fmt.Sprintf("failed to load IDHub log page %d: %s", page, strings.TrimSpace(string(body))), http.StatusBadGateway)
+			return
+		}
+
+		hasher := sha256.New()
+		n, copyErr := io.Copy(io.MultiWriter(tmp, hasher), resp.Body)
+		resp.Body.Close()
+		if copyErr != nil {
+			_ = tmp.Close()
+			http.Error(w, "failed to write log file", http.StatusInternalServerError)
+			return
+		}
+
+		sum := hasher.Sum(nil)
+		if page == 0 {
+			firstBytes = n
+			firstHash = append([]byte(nil), sum...)
+		} else if n == firstBytes && bytes.Equal(sum, firstHash) {
+			_ = tmp.Close()
+			http.Error(w, "IDHub returned the same log page twice; refusing to save a repeated partial log", http.StatusBadGateway)
+			return
+		}
+
+		totalBytes += n
+		pages++
+		if n < pageSize || n == 0 {
+			break
+		}
+		if page == maxPages-1 {
+			truncated = true
+		}
 	}
 
+	if err := tmp.Close(); err != nil {
+		http.Error(w, "failed to finish log file", http.StatusInternalServerError)
+		return
+	}
+	_ = os.Remove(absPath)
+	if err := os.Rename(tmpPath, absPath); err != nil {
+		http.Error(w, "failed to save log file", http.StatusInternalServerError)
+		return
+	}
+	complete = true
+
 	writeJSON(w, map[string]any{
-		"path": filepath.ToSlash(filepath.Join(relDir, fileName)),
+		"path":      filepath.ToSlash(filepath.Join(relDir, fileName)),
+		"bytes":     totalBytes,
+		"pages":     pages,
+		"truncated": truncated,
 	})
+}
+
+func idhubLogPageSize(raw string) int64 {
+	size := atoi64(raw)
+	if size <= 0 {
+		return idhubLogDefaultPageSize
+	}
+	if size > idhubLogMaxPageSize {
+		return idhubLogMaxPageSize
+	}
+	return size
+}
+
+func idhubLogMaxPages(raw string) int {
+	n := atoi(raw)
+	if n <= 0 || n > idhubLogDefaultMaxPages {
+		return idhubLogDefaultMaxPages
+	}
+	return n
+}
+
+func newIDHubLogRequest(r *http.Request, proxy idhubProxyContext, jobID string, pageSize int64, page int) (*http.Request, error) {
+	params := url.Values{}
+	params.Set("page[size]", strconv.FormatInt(pageSize, 10))
+	params.Set("page[number]", strconv.Itoa(page))
+	u := fmt.Sprintf("%s/v1/tenants/%s/jobs/%s/logs?%s",
+		proxy.Base,
+		url.PathEscape(proxy.Tenant),
+		url.PathEscape(jobID),
+		params.Encode(),
+	)
+	req, err := http.NewRequestWithContext(r.Context(), http.MethodGet, u, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Authorization", proxy.Auth)
+	req.Header.Set("Accept", "text/plain,application/json")
+	return req, nil
 }

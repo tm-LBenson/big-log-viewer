@@ -2,10 +2,13 @@ package indexer
 
 import (
 	"bufio"
+	"compress/gzip"
 	"fmt"
 	"io"
 	"math"
 	"os"
+	"path/filepath"
+	"strings"
 )
 
 const Group = 256
@@ -19,27 +22,104 @@ const (
 )
 
 type File struct {
-	Path      string
-	File      *os.File
-	Base      []int64
-	Lines     int
-	Size      int64
-	Mode      string
-	ChunkSize int64
+	Path           string
+	File           *os.File
+	Base           []int64
+	Lines          int
+	Size           int64
+	Mode           string
+	ChunkSize      int64
+	TempPath       string
+	Compressed     bool
+	CompressedSize int64
 }
 
 func Open(path string) (*File, error) {
+	if IsGzipPath(path) {
+		return openGzip(path)
+	}
+
 	f, err := os.Open(path)
 	if err != nil {
 		return nil, err
 	}
-
 	info, err := f.Stat()
 	if err != nil {
 		f.Close()
 		return nil, err
 	}
-	size := info.Size()
+	return openPlain(path, f, info.Size())
+}
+
+func IsGzipPath(path string) bool {
+	return strings.EqualFold(filepath.Ext(path), ".gz")
+}
+
+func openGzip(path string) (*File, error) {
+	info, err := os.Stat(path)
+	if err != nil {
+		return nil, err
+	}
+	tempPath, cleanup, err := DecompressGzipToTemp(path)
+	if err != nil {
+		return nil, err
+	}
+	f, err := os.Open(tempPath)
+	if err != nil {
+		cleanup()
+		return nil, err
+	}
+	tempInfo, err := f.Stat()
+	if err != nil {
+		f.Close()
+		cleanup()
+		return nil, err
+	}
+	lf, err := openPlain(path, f, tempInfo.Size())
+	if err != nil {
+		cleanup()
+		return nil, err
+	}
+	lf.TempPath = tempPath
+	lf.Compressed = true
+	lf.CompressedSize = info.Size()
+	return lf, nil
+}
+
+func DecompressGzipToTemp(path string) (string, func(), error) {
+	src, err := os.Open(path)
+	if err != nil {
+		return "", nil, err
+	}
+	defer src.Close()
+
+	gz, err := gzip.NewReader(src)
+	if err != nil {
+		return "", nil, err
+	}
+	defer gz.Close()
+
+	base := filepath.Base(path)
+	suffix := filepath.Ext(strings.TrimSuffix(base, filepath.Ext(base)))
+	tmp, err := os.CreateTemp("", "biglog-gzip-*"+suffix)
+	if err != nil {
+		return "", nil, err
+	}
+	tempPath := tmp.Name()
+	cleanup := func() { _ = os.Remove(tempPath) }
+	if _, err := io.Copy(tmp, gz); err != nil {
+		tmp.Close()
+		cleanup()
+		return "", nil, err
+	}
+	if err := tmp.Close(); err != nil {
+		cleanup()
+		return "", nil, err
+	}
+	return tempPath, cleanup, nil
+}
+
+func openPlain(path string, f *os.File, size int64) (*File, error) {
 	if size > MaxIndexedBytes {
 		return byteModeFile(path, f, size), nil
 	}
@@ -116,10 +196,18 @@ func byteModeFile(path string, f *os.File, size int64) *File {
 }
 
 func (lf *File) Close() error {
+	var err error
 	if lf.File != nil {
-		return lf.File.Close()
+		err = lf.File.Close()
+		lf.File = nil
 	}
-	return nil
+	if lf.TempPath != "" {
+		if removeErr := os.Remove(lf.TempPath); err == nil {
+			err = removeErr
+		}
+		lf.TempPath = ""
+	}
+	return err
 }
 
 func (lf *File) LinesSlice(start, count int) ([]string, error) {

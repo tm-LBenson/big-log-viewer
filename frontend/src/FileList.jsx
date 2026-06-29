@@ -1,4 +1,5 @@
 import {
+  useCallback,
   useEffect,
   useState,
   useMemo,
@@ -13,6 +14,33 @@ import "./App.css";
 const NAME_COMPARE = (a, b) =>
   a.localeCompare(b, undefined, { numeric: true, sensitivity: "base" });
 
+const formatBytes = (value) => {
+  const n = Number(value || 0);
+  if (!Number.isFinite(n) || n <= 0) return "";
+  const units = ["B", "KB", "MB", "GB", "TB"];
+  let size = n;
+  let unit = 0;
+  while (size >= 1024 && unit < units.length - 1) {
+    size /= 1024;
+    unit += 1;
+  }
+  return `${size >= 10 || unit === 0 ? size.toFixed(0) : size.toFixed(1)} ${units[unit]}`;
+};
+
+const SIZE_FILTERS = [
+  { label: "Any size", value: 0 },
+  { label: "1 MB+", value: 1024 ** 2 },
+  { label: "100 MB+", value: 100 * 1024 ** 2 },
+  { label: "1 GB+", value: 1024 ** 3 },
+  { label: "10 GB+", value: 10 * 1024 ** 3 },
+];
+
+const formatDateTime = (value) => {
+  const n = Number(value || 0);
+  if (!Number.isFinite(n) || n <= 0) return "";
+  return new Date(n).toLocaleString();
+};
+
 const build = (list) => {
   const root = { d: {}, f: [] };
   list.forEach((rel) => {
@@ -26,7 +54,25 @@ const build = (list) => {
   return root;
 };
 
-const sortFiles = (files, mode, mtime) => {
+const normalizeList = (data) => {
+  const raw = Array.isArray(data) ? data : Array.isArray(data?.files) ? data.files : [];
+  return raw
+    .map((entry) => {
+      if (typeof entry === "string") {
+        return { path: entry, modTime: 0, size: 0 };
+      }
+      const path = String(entry?.path || entry?.Path || "");
+      if (!path) return null;
+      return {
+        path,
+        modTime: Number(entry?.modTime || entry?.ModTime || 0),
+        size: Number(entry?.size || entry?.Size || 0),
+      };
+    })
+    .filter(Boolean);
+};
+
+const sortFiles = (files, mode, mtime, size) => {
   const byNameAsc = (a, b) => NAME_COMPARE(a.n, b.n);
   const byNameDesc = (a, b) => -byNameAsc(a, b);
   const byMtimeDesc = (a, b) => {
@@ -47,6 +93,18 @@ const sortFiles = (files, mode, mtime) => {
     if (ma !== mb) return ma - mb;
     return byNameAsc(a, b);
   };
+  const bySizeDesc = (a, b) => {
+    const sa = Number(size?.get(a.p) || 0);
+    const sb = Number(size?.get(b.p) || 0);
+    if (sb !== sa) return sb - sa;
+    return byNameAsc(a, b);
+  };
+  const bySizeAsc = (a, b) => {
+    const sa = Number(size?.get(a.p) || 0);
+    const sb = Number(size?.get(b.p) || 0);
+    if (sa !== sb) return sa - sb;
+    return byNameAsc(a, b);
+  };
   const arr = files.slice();
   switch (mode) {
     case "name-desc":
@@ -57,6 +115,12 @@ const sortFiles = (files, mode, mtime) => {
       break;
     case "mtime-asc":
       arr.sort(byMtimeAsc);
+      break;
+    case "size-desc":
+      arr.sort(bySizeDesc);
+      break;
+    case "size-asc":
+      arr.sort(bySizeAsc);
       break;
     default:
       arr.sort(byNameAsc);
@@ -124,19 +188,22 @@ function FileGlyph() {
 
 function TreeRow({
   label,
+  meta,
+  detail,
   depth,
   selected,
   kind,
   open,
   onClick,
 }) {
+  const title = [label, meta, detail].filter(Boolean).join("\n");
   return (
     <button
       type="button"
       className={`tree-row tree-row--${kind}${selected ? " selected" : ""}`}
       style={{ paddingLeft: depth * 16 + 10 }}
       onClick={onClick}
-      title={label}
+      title={title}
     >
       <span
         className={`tree-row__twisty${kind === "folder" ? "" : " tree-row__twisty--spacer"}`}
@@ -148,6 +215,7 @@ function TreeRow({
         {kind === "folder" ? <FolderGlyph open={open} /> : <FileGlyph />}
       </span>
       <span className="tree-row__label">{label}</span>
+      {meta ? <span className="tree-row__meta">{meta}</span> : null}
     </button>
   );
 }
@@ -163,6 +231,7 @@ function Folder({
   labelOverride,
   sortMode,
   mtime,
+  size,
   pathKey = "",
 }) {
   const key = pathKey || "__root__";
@@ -170,8 +239,8 @@ function Folder({
   const toggle = () => setOpen((prev) => ({ ...prev, [key]: !opened }));
   const label = d === 0 ? labelOverride : n;
   const files = useMemo(
-    () => sortFiles(node.f || [], sortMode, mtime),
-    [node.f, sortMode, mtime],
+    () => sortFiles(node.f || [], sortMode, mtime, size),
+    [node.f, sortMode, mtime, size],
   );
   const folders = useMemo(
     () => sortFolderEntries(Object.entries(node.d || {}), sortMode),
@@ -204,38 +273,47 @@ function Folder({
               labelOverride={labelOverride}
               sortMode={sortMode}
               mtime={mtime}
+              size={size}
               pathKey={childPath}
             />
           );
         })}
       {opened &&
-        files.map((f) => (
-          <TreeRow
-            key={f.p}
-            kind="file"
-            label={f.n}
-            depth={d + 1}
-            selected={sel === f.p}
-            onClick={() => onSel(f.p)}
-          />
-        ))}
+        files.map((f) => {
+          const fileSize = size?.get(f.p) || 0;
+          const modified = mtime?.get(f.p) || 0;
+          return (
+            <TreeRow
+              key={f.p}
+              kind="file"
+              label={f.n}
+              meta={formatBytes(fileSize)}
+              detail={formatDateTime(modified)}
+              depth={d + 1}
+              selected={sel === f.p}
+              onClick={() => onSel(f.p)}
+            />
+          );
+        })}
     </>
   );
 }
 
-export default forwardRef(function FileList({ sel, onSel, onLoaded }, ref) {
-  const [tree, setTree] = useState({ d: {}, f: [] });
+export default forwardRef(function FileList({ sel, recentFiles = [], onSel, onLoaded }, ref) {
   const [paths, setPaths] = useState([]);
   const [open, setOpen] = useState({});
   const [loading, setLoading] = useState(true);
   const [sortOpen, setSortOpen] = useState(false);
   const [sortMode, setSortMode] = useState("mtime-desc");
+  const [filterText, setFilterText] = useState("");
+  const [sizeFilter, setSizeFilter] = useState(0);
   const [mtimeMap, setMtimeMap] = useState(new Map());
+  const [sizeMap, setSizeMap] = useState(new Map());
   const [rootLabel, setRootLabel] = useState("logs");
   const sortBtnRef = useRef(null);
   const [menuPos, setMenuPos] = useState({ top: 0, left: 0 });
 
-  const fetchRoot = async () => {
+  const fetchRoot = useCallback(async () => {
     try {
       const d = await fetch("/api/root").then((r) => r.json());
       const p = d.Path || "";
@@ -243,71 +321,26 @@ export default forwardRef(function FileList({ sel, onSel, onLoaded }, ref) {
     } catch {
       //
     }
-  };
+  }, []);
 
-  const fetchList = async () => {
+  const fetchList = useCallback(async () => {
     setLoading(true);
     await fetchRoot();
-    const list = await fetch("/api/list")
+    const data = await fetch("/api/list?details=1")
       .then((r) => r.json())
       .catch(() => []);
-    const arr = Array.isArray(list) ? list : [];
+    const items = normalizeList(data);
+    const arr = items.map((item) => item.path);
+    setMtimeMap(new Map(items.map((item) => [item.path, item.modTime])));
+    setSizeMap(new Map(items.map((item) => [item.path, item.size])));
     setPaths(arr);
-    setTree(build(arr));
     setLoading(false);
     onLoaded?.(arr);
-  };
+  }, [fetchRoot, onLoaded]);
 
   useEffect(() => {
     fetchList();
-  }, []);
-
-  useEffect(() => {
-    if (!paths.length) return;
-    let cancelled = false;
-    const limit = 8;
-    let idx = 0;
-    const next = async () => {
-      while (idx < paths.length) {
-        const start = idx,
-          end = Math.min(paths.length, start + limit);
-        idx = end;
-        await Promise.all(
-          paths.slice(start, end).map(async (p) => {
-            try {
-              const res = await fetch(
-                `/api/raw?path=${encodeURIComponent(p)}`,
-                { method: "HEAD" },
-              );
-              const lm = res.headers.get("Last-Modified");
-              const t = lm ? Date.parse(lm) : 0;
-              if (!cancelled) {
-                setMtimeMap((prev) => {
-                  if (prev.get(p) === t) return prev;
-                  const m = new Map(prev);
-                  m.set(p, t);
-                  return m;
-                });
-              }
-            } catch {
-              if (!cancelled) {
-                setMtimeMap((prev) => {
-                  if (prev.has(p)) return prev;
-                  const m = new Map(prev);
-                  m.set(p, 0);
-                  return m;
-                });
-              }
-            }
-          }),
-        );
-      }
-    };
-    next();
-    return () => {
-      cancelled = true;
-    };
-  }, [paths]);
+  }, [fetchList]);
 
   useEffect(() => {
     const onDocClick = (e) => {
@@ -328,6 +361,26 @@ export default forwardRef(function FileList({ sel, onSel, onLoaded }, ref) {
 
   useImperativeHandle(ref, () => ({ reload: () => fetchList() }));
 
+  const visiblePaths = useMemo(() => {
+    const needle = filterText.trim().toLowerCase();
+    const minSize = Number(sizeFilter || 0);
+    return paths.filter((p) => {
+      if (needle && !p.toLowerCase().includes(needle)) return false;
+      if (minSize > 0 && Number(sizeMap.get(p) || 0) < minSize) return false;
+      return true;
+    });
+  }, [filterText, paths, sizeFilter, sizeMap]);
+  const tree = useMemo(() => build(visiblePaths), [visiblePaths]);
+  const pathSet = useMemo(() => new Set(paths), [paths]);
+  const visibleRecentFiles = useMemo(
+    () => recentFiles.filter((path) => pathSet.has(path)).slice(0, 6),
+    [pathSet, recentFiles],
+  );
+  const countLabel =
+    visiblePaths.length === paths.length
+      ? paths.length.toLocaleString()
+      : `${visiblePaths.length.toLocaleString()} / ${paths.length.toLocaleString()}`;
+
   return (
     <>
       <aside className="sidebar sidebar--explorer">
@@ -335,11 +388,34 @@ export default forwardRef(function FileList({ sel, onSel, onLoaded }, ref) {
           <div className="sidebar-head__eyebrow">Explorer</div>
           <div className="sidebar-head__title-row">
             <div className="sidebar-head__title">Log files</div>
-            <div className="sidebar-head__meta">{paths.length.toLocaleString()}</div>
+            <div className="sidebar-head__meta">{countLabel}</div>
           </div>
         </div>
 
         <div className="toolbar sidebar-toolbar">
+          <input
+            className="field sidebar-filter"
+            type="search"
+            value={filterText}
+            onChange={(e) => setFilterText(e.target.value)}
+            placeholder="filter files..."
+            aria-label="Filter log files"
+          />
+          <select
+            className="field sidebar-size-filter"
+            value={sizeFilter}
+            onChange={(e) => setSizeFilter(Number(e.target.value))}
+            aria-label="Filter by minimum file size"
+          >
+            {SIZE_FILTERS.map((item) => (
+              <option
+                key={item.value}
+                value={item.value}
+              >
+                {item.label}
+              </option>
+            ))}
+          </select>
           <button
             className="btn btn--primary"
             onClick={() => fetchList()}
@@ -359,12 +435,35 @@ export default forwardRef(function FileList({ sel, onSel, onLoaded }, ref) {
           </div>
         </div>
 
+        {!loading && visibleRecentFiles.length ? (
+          <div className="sidebar-recent">
+            <div className="sidebar-section-title">Recent</div>
+            {visibleRecentFiles.map((path) => {
+              const label = path.split(/[\\/]/).pop();
+              return (
+                <button
+                  key={path}
+                  type="button"
+                  className={`sidebar-recent__item${sel === path ? " selected" : ""}`}
+                  title={path}
+                  onClick={() => onSel(path)}
+                >
+                  <span className="sidebar-recent__name">{label}</span>
+                  <span className="sidebar-recent__meta">
+                    {formatBytes(sizeMap.get(path))}
+                  </span>
+                </button>
+              );
+            })}
+          </div>
+        ) : null}
+
         <div className="sidebar-tree">
           {loading ? (
             <div className="sidebar-spinner-wrap">
               <div className="sidebar-spinner" />
             </div>
-          ) : paths.length ? (
+          ) : visiblePaths.length ? (
             <Folder
               n=""
               node={tree}
@@ -376,7 +475,10 @@ export default forwardRef(function FileList({ sel, onSel, onLoaded }, ref) {
               labelOverride={rootLabel}
               sortMode={sortMode}
               mtime={mtimeMap}
+              size={sizeMap}
             />
+          ) : paths.length ? (
+            <div className="sidebar-empty">No files match the current filters.</div>
           ) : (
             <div className="sidebar-empty">No files found in the current log root.</div>
           )}
@@ -408,6 +510,22 @@ export default forwardRef(function FileList({ sel, onSel, onLoaded }, ref) {
               active={sortMode === "mtime-asc"}
               onClick={() => {
                 setSortMode("mtime-asc");
+                setSortOpen(false);
+              }}
+            />
+            <MenuItem
+              label="Size (largest first)"
+              active={sortMode === "size-desc"}
+              onClick={() => {
+                setSortMode("size-desc");
+                setSortOpen(false);
+              }}
+            />
+            <MenuItem
+              label="Size (smallest first)"
+              active={sortMode === "size-asc"}
+              onClick={() => {
+                setSortMode("size-asc");
                 setSortOpen(false);
               }}
             />

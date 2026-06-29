@@ -13,6 +13,50 @@ const EDGE_STABLE_FRAMES = 3;
 const EDGE_TOLERANCE = 2;
 const ALIGN_TOLERANCE = 16;
 const BUFFER_PAGES = 2;
+const SESSION_KEY = "biglog.lineSessions.v1";
+
+function readSessionStore() {
+  try {
+    const parsed = JSON.parse(window.localStorage.getItem(SESSION_KEY) || "{}");
+    return parsed && typeof parsed === "object" ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+function writeSessionStore(store) {
+  try {
+    window.localStorage.setItem(SESSION_KEY, JSON.stringify(store));
+  } catch {
+    //
+  }
+}
+
+function sessionKey(path, size) {
+  return path && size ? `${path}|${size}` : "";
+}
+
+function readSessionLine(path, size, lineCount) {
+  const key = sessionKey(path, size);
+  if (!key) return 0;
+  const line = Number(readSessionStore()[key]?.line || 0);
+  if (!Number.isFinite(line) || line <= 0) return 0;
+  return Math.max(0, Math.min(Math.max(0, lineCount - 1), Math.floor(line)));
+}
+
+function writeSessionLine(path, size, line) {
+  const key = sessionKey(path, size);
+  if (!key) return;
+  const store = readSessionStore();
+  store[key] = {
+    line: Math.max(0, Math.floor(Number(line || 0))),
+    updatedAt: Date.now(),
+  };
+  const entries = Object.entries(store).sort(
+    (a, b) => Number(b[1]?.updatedAt || 0) - Number(a[1]?.updatedAt || 0),
+  );
+  writeSessionStore(Object.fromEntries(entries.slice(0, 100)));
+}
 
 function isNearTop(scroller) {
   return !scroller || scroller.scrollTop <= EDGE_TOLERANCE;
@@ -67,6 +111,8 @@ export default function useLines(path, virt) {
   const scrollRequestId = useRef(0);
   const programmaticJump = useRef(null);
   const lastRange = useRef(null);
+  const sessionTimer = useRef(0);
+  const sessionMeta = useRef({ path: "", size: 0, mode: "line" });
 
   const refreshFrame = useRef(0);
 
@@ -295,6 +341,8 @@ export default function useLines(path, virt) {
     pendingScroll.current = null;
     programmaticJump.current = null;
     lastRange.current = null;
+    window.clearTimeout(sessionTimer.current);
+    sessionMeta.current = { path: "", size: 0, mode: "line" };
 
     updateWindowState(0, WINDOW_MAX);
     setReady(false);
@@ -319,25 +367,45 @@ export default function useLines(path, virt) {
         const nextMode = d.Mode === "byte" ? "byte" : "line";
         const nextPageSize = nextMode === "byte" ? BYTE_PAGE : PAGE;
         const nextCount = Math.min(WINDOW_MAX, Math.max(0, total));
+        const nextFileSize = d.Size || 0;
+        const restoredLine =
+          nextMode === "line" ? readSessionLine(path, nextFileSize, total) : 0;
+        const initialPage = Math.floor(restoredLine / nextPageSize);
+        const initialBase =
+          nextMode === "line" ? Math.min(restoredLine, Math.max(0, total - nextCount)) : 0;
 
         setFileMode(nextMode);
-        setFileSize(d.Size || 0);
+        setFileSize(nextFileSize);
         setChunkSize(d.ChunkSize || 0);
-        updateWindowState(0, nextCount);
+        sessionMeta.current = { path, size: nextFileSize, mode: nextMode };
+        updateWindowState(initialBase, nextCount);
         setLineCount(total);
         setTick((t) => t + 1);
 
         if (nextMode === "byte") return null;
 
-        return fetch(`/api/chunk?start=0&count=${nextPageSize}`, {
+        return fetch(`/api/chunk?start=${initialPage * nextPageSize}&count=${nextPageSize}`, {
           signal: ctrl.signal,
-        });
+        }).then((response) => ({
+          response,
+          initialPage,
+          initialBase,
+          restoredLine,
+        }));
       })
-      .then((r) => (r ? (r.ok ? r.json() : Promise.reject()) : []))
-      .then((lines) => {
+      .then((result) => {
+        if (!result) return { lines: [] };
+        return result.response.ok
+          ? result.response.json().then((loadedLines) => ({ ...result, lines: loadedLines }))
+          : Promise.reject();
+      })
+      .then((result) => {
         if (ctrl.signal.aborted) return;
-        cache.current.set(0, lines || []);
+        cache.current.set(result.initialPage || 0, result.lines || []);
         setReady(true);
+        if (result.restoredLine > 0) {
+          requestScroll(result.restoredLine - result.initialBase, "start", { lock: true });
+        }
       })
       .catch(() => {
         if (ctrl.signal.aborted) return;
@@ -348,7 +416,7 @@ export default function useLines(path, virt) {
     return () => {
       ctrl.abort();
     };
-  }, [path, updateWindowState]);
+  }, [path, requestScroll, updateWindowState]);
 
   const abs = useCallback((i) => base + i, [base]);
 
@@ -441,13 +509,24 @@ export default function useLines(path, virt) {
     jumpToLine(Math.max(0, lineCount - 1), "bottom");
   }, [jumpToLine, lineCount, pinCurrentWindowEdge]);
 
+  const scheduleSessionLineSave = useCallback((absoluteLine) => {
+    const meta = sessionMeta.current;
+    if (!meta.path || !meta.size || meta.mode !== "line") return;
+    window.clearTimeout(sessionTimer.current);
+    sessionTimer.current = window.setTimeout(() => {
+      writeSessionLine(meta.path, meta.size, absoluteLine);
+    }, 300);
+  }, []);
+
   const handleRange = useCallback(
     ({ startIndex, endIndex }) => {
       const currentBase = baseRef.current;
       const currentWindowCount = windowCountRef.current;
+      const firstVisible = Math.max(0, currentBase + startIndex);
 
       ensure(currentBase + startIndex, currentBase + endIndex);
       lastRange.current = { base: currentBase, startIndex, endIndex };
+      scheduleSessionLineSave(firstVisible);
 
       if (programmaticJump.current) {
         return;
@@ -465,7 +544,7 @@ export default function useLines(path, virt) {
         syncWindow(currentBase - shift, startIndex + shift, "start", { lock: true });
       }
     },
-    [ensure, lineCount, syncWindow],
+    [ensure, lineCount, scheduleSessionLineSave, syncWindow],
   );
 
   const animate = useCallback(
@@ -521,12 +600,14 @@ export default function useLines(path, virt) {
   );
 
   useEffect(() => {
+    const activePageCtrls = pageCtrls.current;
     return () => {
       if (refreshFrame.current) cancelAnimationFrame(refreshFrame.current);
       if (raf.current) cancelAnimationFrame(raf.current);
+      window.clearTimeout(sessionTimer.current);
       if (openCtrl.current) openCtrl.current.abort();
-      pageCtrls.current.forEach((ctrl) => ctrl.abort());
-      pageCtrls.current.clear();
+      activePageCtrls.forEach((ctrl) => ctrl.abort());
+      activePageCtrls.clear();
     };
   }, []);
 

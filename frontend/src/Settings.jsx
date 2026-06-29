@@ -13,6 +13,7 @@ const FALLBACK_DEFAULTS = [
   ".csv",
   ".tsv",
   ".json",
+  ".jsonl",
   ".ndjson",
   ".xml",
   ".md",
@@ -108,7 +109,7 @@ async function parseResponse(response, fallbackMessage) {
 
 export default function Settings({ open, onClose }) {
   const store = useSettings();
-  const init = useMemo(() => store.get(), []);
+  const init = useMemo(() => store.get(), [store]);
   const [rootPath, setRootPath] = useState(init.rootPath);
   const [extsText, setExtsText] = useState(init.extensions.join(", "));
   const [theme, setTheme] = useState(init.theme || "dark");

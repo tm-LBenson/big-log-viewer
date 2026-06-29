@@ -1,6 +1,7 @@
 package indexer
 
 import (
+	"compress/gzip"
 	"os"
 	"path/filepath"
 	"strings"
@@ -32,6 +33,58 @@ func TestOpenLineMode(t *testing.T) {
 	}
 	if got := strings.Join(lines, ""); got != "beta\ngamma\n" {
 		t.Fatalf("slice = %q", got)
+	}
+}
+
+func TestOpenGzipLineMode(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "sample.html.gz")
+	handle, err := os.Create(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gz := gzip.NewWriter(handle)
+	if _, err := gz.Write([]byte("alpha\nbeta\n")); err != nil {
+		t.Fatal(err)
+	}
+	if err := gz.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := handle.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	f, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if f.Mode != ModeLine {
+		t.Fatalf("mode = %q, want %q", f.Mode, ModeLine)
+	}
+	if !f.Compressed {
+		t.Fatalf("compressed = false, want true")
+	}
+	if f.CompressedSize <= 0 {
+		t.Fatalf("compressed size = %d, want positive", f.CompressedSize)
+	}
+	if f.TempPath == "" {
+		t.Fatal("temp path is empty")
+	}
+
+	lines, err := f.LinesSlice(0, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Join(lines, ""); got != "alpha\nbeta\n" {
+		t.Fatalf("slice = %q", got)
+	}
+
+	tempPath := f.TempPath
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(tempPath); !os.IsNotExist(err) {
+		t.Fatalf("temp file still exists or stat failed unexpectedly: %v", err)
 	}
 }
 

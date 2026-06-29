@@ -1,11 +1,28 @@
+import { useMemo } from "react";
+
 const KEY = "biglog:settings";
 
 export const defaultSettings = {
   rootPath: "",
-  extensions: [".log", ".txt", ".html"],
+  extensions: [
+    ".log",
+    ".txt",
+    ".html",
+    ".htm",
+    ".csv",
+    ".tsv",
+    ".json",
+    ".jsonl",
+    ".ndjson",
+    ".xml",
+    ".md",
+    ".js",
+    ".css",
+  ],
   theme: "dark",
   wrap: false,
   lastFile: "",
+  recentFiles: [],
   htmlLight: true,
   hoverColorLight: "#eef2f7",
   lineHighlightColor: "#cfe3ff",
@@ -64,11 +81,15 @@ export async function applyBackend(settings) {
 }
 
 export default function useSettings() {
-  const get = () => load();
-  const set = (patch) => {
-    const next = { ...load(), ...patch };
-    save(next);
-    return next;
-  };
-  return { get, set };
+  return useMemo(
+    () => ({
+      get: () => load(),
+      set: (patch) => {
+        const next = { ...load(), ...patch };
+        save(next);
+        return next;
+      },
+    }),
+    [],
+  );
 }

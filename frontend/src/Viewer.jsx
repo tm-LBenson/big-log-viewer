@@ -5,8 +5,9 @@ import useSearch from "./useSearch";
 import TrackHandle from "./TrackHandle";
 import Row from "./Row";
 import IdHubDashboard from "./IdHubDashboard";
+import FileMetaBar from "./FileMetaBar";
 
-export default function Viewer({ virt, lines, path }) {
+export default function Viewer({ virt, lines, path, fileInfo }) {
   const { controls, lineBar, lineNums, htmlLight, colors, mode, wrap } = useSearch();
   const gutter = lineNums ? 72 : 0;
 
@@ -114,16 +115,17 @@ export default function Viewer({ virt, lines, path }) {
   }, [updateScrollWidth]);
 
   useEffect(() => {
-    if (!hbarRef.current || !scrollerRef.current) return;
+    const hbar = hbarRef.current;
+    const scroller = scrollerRef.current;
+    if (!hbar || !scroller) return;
     const onH = () => {
       if (syncing.current) return;
       syncing.current = true;
-      scrollerRef.current.scrollLeft = hbarRef.current.scrollLeft;
+      scroller.scrollLeft = hbar.scrollLeft;
       syncing.current = false;
     };
-    hbarRef.current.addEventListener("scroll", onH, { passive: true });
-    return () =>
-      hbarRef.current && hbarRef.current.removeEventListener("scroll", onH);
+    hbar.addEventListener("scroll", onH, { passive: true });
+    return () => hbar.removeEventListener("scroll", onH);
   }, []);
 
   return (
@@ -164,6 +166,15 @@ export default function Viewer({ virt, lines, path }) {
         <div className="divider" />
         {controls}
       </nav>
+
+      {mode === "standard" ? (
+        <FileMetaBar
+          info={fileInfo}
+          viewerMode={lines.fileMode}
+          lineCount={lines.count}
+          fileSize={lines.fileSize}
+        />
+      ) : null}
 
       {mode === "standard" && (
         <div className={`subbar ${lineNums ? "open" : ""}`}>{lineBar}</div>
